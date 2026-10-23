@@ -4,6 +4,8 @@
 
 A small Chrome extension for using ChatGPT, Claude, Gemini, and Grok together **in Chrome’s native Split View**. Conversations stay on their own websites. No dashboard, embedded chats, AI API keys, or server.
 
+**[Install from the Chrome Web Store](https://chromewebstore.google.com/detail/ai-split-bridge/blpbjnnhonpljglaffglpopmonamlgap)**
+
 The extension adds two small controls to each AI site, inside the site’s own interface. Nothing changes how the site normally works: its Send button and Enter still send only to that chat.
 
 ![ChatGPT and Gemini side by side in Chrome Split View. Send both sits beside each composer, and Share with… sits in each reply toolbar.](figs/screnshot.png)
