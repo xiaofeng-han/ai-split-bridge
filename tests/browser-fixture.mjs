@@ -8,6 +8,10 @@ const pdfFixtures = await Promise.all(['a', 'b'].map(async letter => ({
   name: `bridge-test-${letter}.pdf`, type: 'application/pdf',
   data: (await readFile(new URL(`./fixtures/bridge-test-${letter}.pdf`, import.meta.url))).toString('base64'),
 })));
+const docFixture = {
+  name: 'Generated course plan.docx', type: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+  data: (await readFile(new URL('./fixtures/bridge-generated.docx', import.meta.url))).toString('base64'),
+};
 
 const hosts = { chatgpt: 'chatgpt.com', claude: 'claude.ai', gemini: 'gemini.google.com', grok: 'grok.com' };
 const names = { chatgpt: 'ChatGPT', claude: 'Claude', gemini: 'Gemini', grok: 'Grok' };
@@ -19,7 +23,7 @@ const glyph = {
   send: icon.replace('PATH', 'M10 15V5M6 9l4-4 4 4'),
 };
 const replies = {
-  chatgpt: (text, i) => `<article class="turn"><div data-message-author-role="assistant"><div class="markdown">${text}</div></div>
+  chatgpt: (text, i) => `<article class="turn"><div data-message-author-role="assistant"><div class="markdown">${text}</div>${i === 2 ? '<span class="generated"><button type="button" aria-label="Open preview of bridge-test-a.pdf">bridge-test-a.pdf</button><button type="button" aria-label="Download file" id="generated-download">Download file</button></span>' : ''}</div>
     <div class="actions"><span><button data-testid="copy-turn-action-button" aria-label="Copy" id="copy-${i}">${glyph.copy}</button></span><button aria-label="Good response">${glyph.like}</button></div></article>`,
   claude: (text, i) => `<div class="turn"><div data-testid="assistant-message" class="font-claude-response">${text}</div>
     <div class="actions"><button data-testid="action-bar-copy" aria-label="Copy" id="copy-${i}">${glyph.copy}</button><button aria-label="Give positive feedback">${glyph.like}</button></div></div>`,
@@ -86,11 +90,31 @@ const server = createServer(async (req, res) => {
     const dark = url.searchParams.get('theme') === 'dark';
     const split = url.searchParams.get('split') !== 'none';
     const file = url.pathname.slice(1);
-    if (['adapters.js', 'content.js', 'popup.js', 'popup.css', 'settings.js'].includes(file)) {
+    if (file === 'code/artifact/fixture-doc') {
+      res.setHeader('Content-Type', 'text/html; charset=utf-8');
+      return res.end(`<!doctype html><html><body><div role="dialog" aria-label="Generated course plan"><h2>Generated course plan</h2>
+        <span role="radio" tabindex="0" id="export">Export</span>
+        <button id="word" hidden>Word, Editable .docx document</button><button aria-label="Close" id="close">Close</button></div>
+        <script>
+          document.getElementById('export').onclick=()=>document.getElementById('word').hidden=false;
+          document.getElementById('word').onclick=()=>{
+            const binary=atob(${JSON.stringify(docFixture.data)});
+            const link=document.createElement('a');link.download=${JSON.stringify(docFixture.name)};
+            link.href=URL.createObjectURL(new Blob([Uint8Array.from(binary,c=>c.charCodeAt(0))],{type:${JSON.stringify(docFixture.type)}}));
+            link.click();URL.revokeObjectURL(link.href);
+          };
+          document.getElementById('close').onclick=()=>window.frameElement.remove();
+        </script></body></html>`);
+    }
+    if (['download-capture.js', 'reply-files.js', 'adapters.js', 'content.js', 'popup.js', 'popup.css', 'settings.js'].includes(file)) {
       let source = await readFile(new URL(`../extension/${file}`, import.meta.url), 'utf8');
       if (file === 'adapters.js') source = source.replace('hosts.includes(location.hostname)', `hosts.includes(${JSON.stringify(hosts[provider])})`);
       res.setHeader('Content-Type', file.endsWith('.css') ? 'text/css' : 'text/javascript');
       return res.end(source);
+    }
+    if (file === 'generated-report.pdf') {
+      res.setHeader('Content-Type', 'application/pdf');
+      return res.end(Buffer.from(pdfFixtures[0].data, 'base64'));
     }
     if (/^icons\/[\w-]+\.png$/.test(file)) {
       res.setHeader('Content-Type', 'image/png');
@@ -148,7 +172,9 @@ const server = createServer(async (req, res) => {
         <div class="user">Can you check the pricing assumptions in this plan?</div>
         ${replies[provider]('<p>The plan assumes a 4% monthly churn, which is optimistic for a new product.</p><p>I would test the price with a smaller group first.</p>', 1)}
         <div class="user">What would you change first?</div>
-        ${replies[provider]('<p>Start with the onboarding email: it carries most of the conversion.</p>', 2)}
+        ${replies[provider]('<p>Start with the onboarding email: it carries most of the conversion.</p>' + (provider === 'chatgpt' ? '' : provider === 'claude'
+          ? '<div data-sheet-kind="doc"><button type="button" data-testid="frame-card-open" aria-label="View Generated course plan">Generated course plan</button><button type="button" data-testid="frame-card-share" aria-label="Share Generated course plan">Share/export</button></div>'
+          : '<p><a download="bridge-test-a.pdf" href="/generated-report.pdf">Download the generated report</a></p>'), 2)}
         ${composers[provider]}
         <section class="checks"><b>Fixture</b> · ${names[provider]} · no requests to AI services
           <div><button id="run" type="button">Run editor checks</button></div><pre id="results" role="status">Not run yet.</pre>
@@ -156,6 +182,11 @@ const server = createServer(async (req, res) => {
         </section>
       </main>
       <script>
+        const docShare=document.querySelector('[data-testid="frame-card-share"]');
+        if(docShare)docShare.onclick=()=>{
+          const frame=document.createElement('iframe');frame.src='/code/artifact/fixture-doc';frame.title='Generated course plan';
+          frame.style.cssText='position:fixed;inset:20%;width:60%;height:40%;background:white;z-index:10000';document.body.append(frame);
+        };
         const fixtureContext = ${JSON.stringify(context(provider, split))};
         const named = ids => ids.map(id => fixtureContext.chats.find(chat => chat.id === id).name).join(' and ');
         const record = m => { document.getElementById('destination').value = JSON.stringify(m, null, 2); };
@@ -167,8 +198,15 @@ const server = createServer(async (req, res) => {
           if (m.type === 'ASB_SHOW') return {ok:true,message:'Fixture: no tabs changed.'};
           return {ok:false,error:'This local fixture does not handle ' + m.type + '.'};
         }}};
-      </script><script src="/adapters.js?provider=${provider}"></script><script src="/content.js"></script>
+      </script><script src="/download-capture.js"></script><script src="/reply-files.js"></script><script src="/adapters.js?provider=${provider}"></script><script src="/content.js"></script>
       <script>
+        const generatedDownload=document.getElementById('generated-download');
+        if(generatedDownload)generatedDownload.onclick=()=>{
+          const binary=atob(${JSON.stringify(pdfFixtures[0].data)});
+          const blob=new Blob([Uint8Array.from(binary,c=>c.charCodeAt(0))],{type:'application/pdf'});
+          const link=document.createElement('a');link.download='bridge-test-a.pdf';link.href=URL.createObjectURL(blob);
+          link.click();URL.revokeObjectURL(link.href);
+        };
         const editor=document.querySelector('.composer [contenteditable]'); let clicks=0;let inputs=0;
         document.getElementById('site-send').onclick=()=>clicks++;
         editor.addEventListener('input',()=>inputs++);
@@ -227,6 +265,15 @@ const server = createServer(async (req, res) => {
             const bytes=await Promise.all(received.map(async file=>btoa(String.fromCharCode(...new Uint8Array(await file.arrayBuffer())))));
             check(bytes.every((data,i)=>data===pdfs[i].data),'Both PDF files arrive byte-for-byte intact');
             await a.cancel(pdfRequest);check(tiles.children.length===0&&a.getDraft().text==='','Two-file rollback leaves an empty destination');
+            const generated=a.getResponse();
+            check(generated.files?.length===1,'Generated file is discovered in its own reply');
+            const sharedFiles=await a.readReplyFiles(generated.files);
+            check(sharedFiles[0].data===${JSON.stringify((provider === 'claude' ? docFixture : pdfFixtures[0]).data)},'Generated file download preserves every byte');
+            const sharedDraft={requestId:crypto.randomUUID(),text:'Review the generated report.',source:false,attachments:1};
+            a.preflight(sharedDraft);await a.stage({...sharedDraft,files:sharedFiles});await a.validate(sharedDraft);a.keep(sharedDraft);
+            await a.cancel(sharedDraft);
+            check(tiles.children.length===1&&a.getDraft().text===sharedDraft.text,'Kept shared draft retains its file without submitting or rollback');
+            tiles.replaceChildren();editor.replaceChildren();
             ${provider === 'chatgpt' ? `
             const card=document.createElement('span');card.className='composer-attachment-surface';
             card.innerHTML='<span>Truncated long paste…</span><button type="button">Show in text field</button><button type="button" aria-label="Remove pasted text attachment">×</button>';

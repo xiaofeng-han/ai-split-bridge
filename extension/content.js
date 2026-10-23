@@ -10,6 +10,7 @@
     ASB_STAGE: message => adapter.stage(message),
     ASB_VALIDATE: message => adapter.validate(message),
     ASB_COMMIT: message => adapter.commit(message),
+    ASB_KEEP: message => adapter.keep(message),
     ASB_CANCEL: message => adapter.cancel(message),
     ASB_INSERT: message => adapter.insert(message),
     ASB_CAN_LEAVE: () => adapter.canLeave(),
@@ -110,6 +111,9 @@
     .link { width:100%; margin-top:4px; padding:8px; border:0; border-radius:var(--item-radius); background:none; font-size:13px; }
     .hint { margin:0; padding:8px 10px 2px; font-size:12px; line-height:1.4; color:var(--muted); text-align:center; }
     .menu > .hint { padding-bottom:6px; }
+    .file-option { display:flex; align-items:center; gap:7px; padding:6px 10px 2px; font-size:13px; color:var(--fg); cursor:pointer; }
+    .file-option input { margin:0; accent-color:var(--accent); }
+    .file-names { margin:0 10px 5px; padding:3px 0 9px; border-bottom:1px solid var(--line); color:var(--muted); font-size:12px; overflow-wrap:anywhere; }
     .toast { max-width:340px; padding:11px 15px; border-radius:min(var(--menu-radius),14px); font-size:13.5px; line-height:1.45; }
     .toast.error { color:var(--danger); }
   `;
@@ -374,9 +378,9 @@
     footer.append(go);
     if (!shares.size) {
       const latest = button('link', 'Share this chat’s latest reply…');
-      latest.addEventListener('click', () => {
+      latest.addEventListener('click', async () => {
         let reply;
-        try { reply = adapter.getResponse(); } catch (error) { closeLayer(menu); return toast(pill, error.message, true); }
+        try { reply = await (adapter.readResponse ? adapter.readResponse() : adapter.getResponse()); } catch (error) { closeLayer(menu); return toast(pill, error.message, true); }
         renderShareMenu(reply);
         place(menu, menuAnchor, menuAbove);
       });
@@ -418,6 +422,16 @@
     const draft = context.shareMode === 'draft';
     const what = reply.partial ? 'the selected text' : 'this reply';
     menu.replaceChildren(el('p', 'heading', draft ? `Share ${what} with` : `Send ${what} to`));
+    let includeFiles = true;
+    if (reply.files?.length && !reply.partial) {
+      const option = el('label', 'file-option');
+      const checkbox = document.createElement('input');
+      checkbox.type = 'checkbox';
+      checkbox.checked = true;
+      checkbox.addEventListener('change', () => { includeFiles = checkbox.checked; });
+      option.append(checkbox, document.createTextNode(` Include ${reply.files.length} generated file${reply.files.length === 1 ? '' : 's'}`));
+      menu.append(option, el('p', 'file-names', reply.files.map(file => file.name).join(', ')));
+    }
     const add = (name, detail, disabled, choice) => {
       const row = button('row');
       row.setAttribute('role', 'menuitem');
@@ -425,7 +439,10 @@
       row.append(label(name, detail));
       row.addEventListener('click', () => {
         closeLayer(menu);
-        run(menuAnchor, () => request({ type: 'ASB_SHARE', ...choice, reply: reply.text }));
+        run(menuAnchor, async () => {
+          const files = includeFiles && !reply.partial && reply.files?.length ? await adapter.readReplyFiles(reply.files) : [];
+          return request({ type: 'ASB_SHARE', ...choice, reply: reply.text, ...(files.length ? { files } : {}) });
+        });
       });
       menu.append(row);
     };
@@ -449,9 +466,9 @@
     trigger.append(icon('share'), el('span', '', 'Share with…'));
     trigger.title = 'Share this reply with another chat';
     trigger.addEventListener('pointerdown', () => { dismissedBy = isOpen(menu) && menuAnchor === trigger ? trigger : null; });
-    trigger.addEventListener('click', () => {
+    trigger.addEventListener('click', async () => {
       let reply;
-      try { reply = adapter.replyText(response); } catch (error) { return toast(trigger, error.message, true); }
+      try { reply = await (adapter.readReply ? adapter.readReply(response) : adapter.replyText(response)); } catch (error) { return toast(trigger, error.message, true); }
       toggleMenu(trigger, () => renderShareMenu(reply), false);
     });
     view.root.append(trigger);

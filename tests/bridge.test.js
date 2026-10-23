@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { createBridge, validateText } from '../extension/bridge.js';
+import { createBridge, validateText, validateFiles } from '../extension/bridge.js';
 import { createTabManager } from '../extension/tabs.js';
 import { mockChrome, chatTabs, deferred } from './mock-chrome.js';
 
@@ -331,4 +331,39 @@ test('invalid or oversized text is rejected without touching any composer', asyn
     assert.equal(model.messages().length, 0);
   }
   assert.doesNotThrow(() => validateText('x'.repeat(60000)));
+});
+
+const sharedFile = { name: 'report.docx', type: 'application/octet-stream', data: 'AP8B' };
+for (const send of [true, false]) {
+  test(`shared files are uploaded and validated before ${send ? 'sending once' : 'keeping a draft without rollback'}`, async () => {
+    const { model, bridge } = setup();
+    await bridge.share(1, { targetId: 2 }, 'Review this document.', { send, files: [sharedFile] });
+    assert.equal(model.messages('ASB_PREPARE')[0].args[1].attachments, 1);
+    assert.deepEqual(model.messages('ASB_STAGE')[0].args[1].files, [sharedFile]);
+    assert.equal(model.messages('ASB_VALIDATE').length, 1);
+    assert.equal(model.messages('ASB_COMMIT').length, send ? 1 : 0);
+    assert.equal(model.messages('ASB_KEEP').length, send ? 0 : 1);
+    assert.equal(model.messages('ASB_CANCEL').length, send ? 1 : 0, 'a kept draft must retain its files');
+    assert.ok(model.messages().every(call => call.args[0] === 2), 'the source is untouched');
+  });
+}
+
+test('a failed shared upload or draft validation cancels its copies and reports leftovers', async () => {
+  const { model, bridge } = setup();
+  model.respond = (_id, message) => message.type === 'ASB_VALIDATE' ? { ok: false, error: 'Upload rejected.' }
+    : { ok: true, ...(message.type === 'ASB_CANCEL' ? { leftAttachments: 1 } : {}) };
+  await assert.rejects(bridge.share(1, { targetId: 2 }, 'Review.', { files: [sharedFile] }), /Nothing was sent.*Upload rejected.*Remove the copied attachments/);
+  assert.equal(model.messages('ASB_COMMIT').length, 0);
+  assert.equal(model.messages('ASB_KEEP').length, 0);
+});
+
+test('invalid file payloads are refused before navigating or touching the destination', async () => {
+  for (const files of [null, Array(11).fill(sharedFile), [{ ...sharedFile, data: 'not base64' }], [{ ...sharedFile, name: '' }], [{ ...sharedFile, type: {} }]]) {
+    const { model, bridge } = setup();
+    await assert.rejects(bridge.share(1, { targetId: 3 }, 'Review.', { files }));
+    assert.equal(model.messages().length, 0);
+  }
+  const data = Buffer.alloc(20 * 1024 * 1024).toString('base64');
+  assert.doesNotThrow(() => validateFiles([{ ...sharedFile, data }]));
+  assert.throws(() => validateFiles([{ ...sharedFile, data }, { ...sharedFile, data }]), /32 MB/);
 });

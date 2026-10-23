@@ -576,6 +576,14 @@
     return { ok: true, status: "clicked" };
   }
 
+  // Release a verified shared draft without clicking Send or rolling back its files.
+  function keep({ requestId: id }) {
+    ready(transactionFor(id));
+    transactions.delete(id);
+    finished.set(id, Date.now());
+    return { ok: true };
+  }
+
   async function cancel({ requestId: id }) {
     requestId(id);
     const transaction = transactions.get(id);
@@ -649,13 +657,25 @@
   }
 
   // Reads one reply, or only the part of it the user has selected.
+  function replyScope(element) {
+    return element.closest("[data-chatgpt-selection-message-id], [data-message-author-role='assistant'], [data-message-role='assistant'], [data-testid='assistant-message'], model-response") || element;
+  }
+
   function replyText(element) {
     const selected = selectedWithin(element);
     if (selected) return { ok: true, text: checkedText(selected), partial: true };
     if (!followedByNewer(element)) assertIdle();
+    const files = globalThis.AISplitReplyFiles?.list(replyScope(element)) || [];
     const text = responseText(element);
-    if (!text) throw new Error(`This ${config.name} reply has no text to share. Select the text you want, then try again.`);
-    return { ok: true, text: checkedText(text), partial: false };
+    if (!text && !files.length) throw new Error(`This ${config.name} reply has no text or files to share. Select the text you want, then try again.`);
+    return { ok: true, text: checkedText(text, files.length > 0), partial: false, ...(files.length ? { files } : {}) };
+  }
+
+  async function readReply(element) {
+    if (selectedWithin(element)) return replyText(element);
+    if (!followedByNewer(element)) assertIdle();
+    await globalThis.AISplitReplyFiles?.expand(replyScope(element));
+    return replyText(element);
   }
 
   function latestReply() {
@@ -807,7 +827,10 @@
     provider,
     name: config.name,
     getDraft: () => ({ ok: true, text: readEditor(getEditor()) }),
-    readPrompt, canLeave, preflight, stage, validate, commit, cancel, insert, getResponse, replyText,
+    readPrompt, canLeave, preflight, stage, validate, commit, keep, cancel, insert, getResponse, replyText,
+    readReplyFiles: files => globalThis.AISplitReplyFiles.read(files),
+    readReply,
+    readResponse: async () => { getResponse(); return readReply(latestReply()); },
     composerAnchor, replyAnchors, ownsEditor, styleSource, busy,
   });
 })();

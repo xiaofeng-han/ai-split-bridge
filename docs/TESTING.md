@@ -8,7 +8,7 @@ Run `npm run preview` and open `http://127.0.0.1:4173`.
 
 - **Provider links**: each page imitates that site’s replies, composer, colours, and button shapes, and runs the real adapter and controls. Use them to check that the controls blend in with each site.
 - **Dark** and **No split**: switch the page’s theme and split state.
-- **Run editor checks**: covers multiline insertion, input events, rollback, duplicate-click protection, draft insertion, where the controls attach, link and tool chips, and copying an attachment into the composer once and removing it again. You can also paste or drop real files into the fixture composer to see its attachment tiles.
+- **Run editor checks**: covers multiline insertion, input events, rollback, duplicate-click protection, draft insertion, where the controls attach, link and tool chips, and copying an attachment into the composer once and removing it again. It also reads a generated file from the second reply, compares its bytes, uploads it and keeps it as a draft. ChatGPT uses a sibling PDF card with a blob download; Claude exports a synthetic Word document through a same-origin artifact frame; Gemini and Grok use explicit PDF download links. You can also paste or drop real files into the fixture composer to see its attachment tiles.
 - **Popup**: shows the real popup, including the share settings. Settings are kept for the fixture tab only.
 - **Bottom box**: shows the message the extension would have sent.
 
@@ -54,6 +54,11 @@ Use `tests/fixtures/bridge-test-a.pdf` and `bridge-test-b.pdf`; both contain syn
 6. Choose an assistant that isn’t open. Confirm it opens on the other side and receives the message after loading.
 7. Share into a nonempty composer, or into a chat that is still replying. Confirm nothing is sent, the original draft survives, and an error explains why.
 8. Exchange replies without waiting: share ChatGPT’s reply with Claude, then, while Claude is still writing its answer, click **Share with…** on Claude’s previous reply and choose ChatGPT. Confirm it is sent to ChatGPT right away. **Share with…** on a reply that is still being written, or being regenerated, must still say to wait.
+9. Generate a small Word document or PDF with a synthetic token that appears only in the file. Share that reply. Confirm the menu lists the filename with **Include generated files** checked, the destination receives one attachment, and its answer can read the token. Repeat with ChatGPT’s native file card and a Claude Docs card; Claude Docs should open Export, select Word and close its export dialog. It shares the current saved document, including later edits.
+10. Repeat in draft mode. Confirm the uploaded file and text remain in the destination, with no submission. Manually send or remove the draft, then try an empty reply containing only a generated file.
+11. Uncheck generated files and share again: only text should arrive. Select part of the reply and confirm no file is included. Ordinary PDF citations must stay links and should not be downloaded as generated output.
+12. Try an expired download, a file over 20 MB, over 32 MB of combined files, and a destination that rejects the upload. Confirm nothing is submitted and the error explains what could not be copied. Verify ordinary native downloads still work after a successful share and after a failure. Open an unrelated dialog before sharing a Claude Doc and confirm it is preserved.
+13. In Claude, generate CSV and JSON files with the same display title, an `.ipynb` notebook, and a ZIP. Confirm all four native file cards appear in Share and arrive separately with their original filenames. A notebook served as JSON must remain an `.ipynb`; it must not be rejected as an error page. Repeat in the other direction with Word, Excel, PowerPoint, PDF, and PNG outputs. Ask the receiving AI to read a marker present only inside each file, and check that it was absent from the shared reply text.
 
 ## Show on the other side
 
@@ -69,3 +74,15 @@ Use `tests/fixtures/bridge-test-a.pdf` and `bridge-test-b.pdf`; both contain syn
 2. Reload the extension and refresh the AI pages. Confirm each control appears exactly once. If a control stops responding, check the extension’s errors on `chrome://extensions`.
 
 Repeat sending and sharing with all four providers as both source and destination. Account layouts and locales can expose selector differences. Report the provider, visible error, and the changed control markup, without private conversation contents.
+
+## Recorded live checks — 23 October 2026
+
+Version 0.7.0 was loaded into the installed unpacked extension, and the disposable test tabs were refreshed. Tests used synthetic data only.
+
+| Source → destination | Files | Verified result |
+| --- | --- | --- |
+| Claude → ChatGPT | CSV, JSON, IPYNB, ZIP | Four separate attachments; the receiver read all four markers, including the notebook cell and the text file inside the ZIP. |
+| ChatGPT → Claude | DOCX, XLSX, PPTX, PDF, PNG | Five separate attachments; the receiver read all five markers, including the text drawn only in PNG pixels. ChatGPT’s collapsed file list expanded automatically. |
+| Claude Docs → ChatGPT | Native Docs card exported as DOCX | The bridge used the native export dialog, uploaded the Word copy, and the receiver read its marker. |
+
+Markers were absent from the shared reply text. Claude’s tools referred to the PNG internally as `image.png`, while its user-message attachment card retained `bridge-image.png`. These are content-access checks; the byte-for-byte checks remain in the local fixtures. Live tests also exposed and fixed native control redraws during download and an installed extension pointing at an older repository copy. In Chrome’s extension Details, verify both **Version** and **Loaded from** when reproducing an issue.

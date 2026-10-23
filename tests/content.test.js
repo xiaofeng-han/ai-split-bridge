@@ -193,6 +193,33 @@ test('a menu that fits on neither side opens on the roomier side and scrolls ins
   assert.equal(view.menu.style.maxHeight, '');
 });
 
+test('sharing lists generated files, reads them only on destination click, and supports an explicit text-only share', async t => {
+  const view = setup(t);
+  const descriptors = [{ name: 'report.docx' }];
+  const file = { name: 'report.docx', data: 'AP8B' };
+  let reads = 0;
+  view.adapter.replyText = () => ({ text: 'Here is the report.', partial: false, files: descriptors });
+  view.adapter.readReplyFiles = async files => { assert.equal(files, descriptors); reads++; return [file]; };
+  await settle();
+  const share = view.hosts('share')[0].shadowRoot.querySelector('.share-button');
+  await view.click(share);
+  assert.match(view.menu.textContent, /Include 1 generated file.*report.docx/);
+  assert.equal(reads, 0);
+  await view.click(view.row('Claude'));
+  assert.deepEqual(view.sent('ASB_SHARE')[0].files, [file]);
+  assert.equal(reads, 1);
+  await view.click(share);
+  await view.click(view.menu.querySelector('input[type="checkbox"]'));
+  await view.click(view.row('Claude'));
+  assert.equal(view.sent('ASB_SHARE')[1].files, undefined);
+  assert.equal(reads, 1);
+  view.adapter.readReplyFiles = async () => { throw new Error('The file expired. Nothing was sent.'); };
+  await view.click(share);
+  await view.click(view.row('Claude'));
+  assert.equal(view.sent('ASB_SHARE').length, 2, 'a failed file read must not silently send text');
+  assert.match(view.toast.textContent, /file expired/);
+});
+
 test('without Copy buttons the chooser can still share the latest reply', async t => {
   const view = setup(t);
   view.adapter.replyAnchors = () => [];

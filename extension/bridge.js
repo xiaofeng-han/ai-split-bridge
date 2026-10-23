@@ -90,9 +90,9 @@ export function createBridge(api, manager, { retryDelay = 500, retryLimit = 40 }
   }
 
   // Sends to one chat with the same staged checks as Send both; the source chat is never touched.
-  async function deliver(sourceId, tabId, text, expect) {
+  async function deliver(sourceId, tabId, text, expect, { files = [], send = true } = {}) {
     const requestId = crypto.randomUUID();
-    const payload = { requestId, text, source: false };
+    const payload = { requestId, text, source: false, attachments: files.length };
     try {
       for (let attempt = 1; ; attempt++) {
         try { await ask(tabId, 'ASB_PREPARE', { ...payload, ...expect }); break; }
@@ -102,20 +102,25 @@ export function createBridge(api, manager, { retryDelay = 500, retryLimit = 40 }
           await new Promise(resolve => setTimeout(resolve, retryDelay));
         }
       }
-      await ask(tabId, 'ASB_STAGE', payload);
+      await ask(tabId, 'ASB_STAGE', { ...payload, ...(files.length ? { files } : {}) });
       await ask(tabId, 'ASB_VALIDATE', payload);
       chosen(await manager.context(sourceId), [tabId]);
+      if (!send) {
+        await ask(tabId, 'ASB_KEEP', { requestId });
+        return;
+      }
     } catch (error) {
-      await ask(tabId, 'ASB_CANCEL', { requestId }).catch(() => {});
-      throw new Error(`Nothing was sent. ${error.message}`);
+      const cleanup = await ask(tabId, 'ASB_CANCEL', { requestId }).catch(() => null);
+      throw new Error(`Nothing was sent. ${error.message}${cleanup?.leftAttachments ? ' Remove the copied attachments still in that chat.' : ''}`);
     }
     try { await ask(tabId, 'ASB_COMMIT', { requestId }); }
     catch (error) { throw new Error(`${error.message} Delivery is unconfirmed; check that chat before sending again.`); }
     finally { await ask(tabId, 'ASB_CANCEL', { requestId }).catch(() => {}); }
   }
 
-  async function share(sourceId, { targetId, provider } = {}, text, { send = false } = {}) {
-    validateText(text);
+  async function share(sourceId, { targetId, provider } = {}, text, { send = false, files = [] } = {}) {
+    validateFiles(files);
+    validateText(text, { allowEmpty: files.length > 0 });
     const state = await manager.context(sourceId);
     if (targetId !== undefined) {
       const chat = state.chats.find(item => item.id === targetId);
@@ -124,10 +129,11 @@ export function createBridge(api, manager, { retryDelay = 500, retryLimit = 40 }
         if (chat.asleep) throw new Error(`${chat.name} is asleep. Open its tab once to wake it, then try again.`);
         const where = chat.side ? '' : ' in its tab';
         if (send) {
-          await deliver(sourceId, chat.id, text);
+          await deliver(sourceId, chat.id, text, undefined, { files, send });
           return { ok: true, message: `Sent to ${chat.name}${where}.` };
         }
-        await ask(chat.id, 'ASB_INSERT', { text });
+        if (files.length) await deliver(sourceId, chat.id, text, undefined, { files, send: false });
+        else await ask(chat.id, 'ASB_INSERT', { text });
         return { ok: true, message: `Draft added to ${chat.name}${where}. Review it, then send it there.` };
       }
     } else if (!Object.hasOwn(PROVIDERS, provider)) {
@@ -139,10 +145,11 @@ export function createBridge(api, manager, { retryDelay = 500, retryLimit = 40 }
     const expect = { provider: shown.provider, notPage: shown.previousPage };
     const name = PROVIDERS[shown.provider].name;
     if (send) {
-      await deliver(sourceId, shown.tabId, text, expect);
+      await deliver(sourceId, shown.tabId, text, expect, { files, send });
       return { ok: true, message: `Sent to ${name}, now on the ${state.peer.side}.` };
     }
-    await insertWhenReady(shown.tabId, text, expect);
+    if (files.length) await deliver(sourceId, shown.tabId, text, expect, { files, send: false });
+    else await insertWhenReady(shown.tabId, text, expect);
     return { ok: true, message: `${name} is on the ${state.peer.side} with the draft ready. Review it, then send it there.` };
   }
 
@@ -163,4 +170,20 @@ function list(names) {
 export function validateText(text, { allowEmpty = false } = {}) {
   if (typeof text !== 'string' || (!allowEmpty && !text.trim())) throw new Error('Write a message in the chat composer first.');
   if (text.length > 60000) throw new Error('Keep shared text under 60,000 characters for this prototype.');
+}
+
+export function validateFiles(files) {
+  if (!Array.isArray(files) || files.length > MAX_FILES) throw new Error('Share up to 10 files at a time. Nothing was sent.');
+  let total = 0;
+  for (const file of files) {
+    if (!file || typeof file.name !== 'string' || !file.name.trim() || file.name.length > 255
+      || typeof file.data !== 'string' || file.data.length > 4 * Math.ceil(20 * 1024 * 1024 / 3)
+      || file.data.length % 4 !== 0 || !/^[A-Za-z0-9+/]*={0,2}$/.test(file.data)
+      || (file.type !== undefined && (typeof file.type !== 'string' || file.type.length > 200))) {
+      throw new Error('A shared file is invalid or exceeds 20 MB. Nothing was sent.');
+    }
+    const bytes = file.data.length / 4 * 3 - (file.data.endsWith('==') ? 2 : file.data.endsWith('=') ? 1 : 0);
+    total += bytes;
+    if (bytes > 20 * 1024 * 1024 || total > 32 * 1024 * 1024) throw new Error('Shared files must fit within 20 MB each and 32 MB in total. Nothing was sent.');
+  }
 }

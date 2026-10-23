@@ -1,19 +1,21 @@
 # AI Split Bridge privacy policy
 
-Last updated: 15 October 2026
+Last updated: 23 October 2026
 
 AI Split Bridge is a Chrome extension for sending one prompt to several AI chats and sharing replies between them. It runs entirely in your browser. The developer runs no server and receives none of your data.
 
 ## What the extension handles
 
 - **Prompts**: the text, links, and attached files in the composer of ChatGPT, Claude, Gemini, or Grok. They are read only when you click **Send both** (or use its shortcut).
-- **Replies**: the text of a reply, read only when you click **Share with…**.
+- **Replies**: the text and detected generated files of a reply. The share menu lists included files, and you can uncheck them to share text only. File contents are read only after you choose a destination. Claude Docs cards are exported as a Word copy of the current saved document.
 - **Open AI tabs**: the titles and addresses of ChatGPT, Claude, Gemini, and Grok tabs in the current window, used to list the chats you can send to and to tell which side of Split View each one is on. Other tabs and sites are not accessed.
 - **Share settings**: whether shared replies are sent right away, and the message you wrote to go with them.
 
 ## How it is used
 
-Only to carry out the action you clicked. The prompt or reply is placed in the composer of each chat you chose, and that site's own Send button is clicked. From then on it is handled by that AI provider under its own privacy policy, exactly as if you had typed it there yourself.
+Only to carry out the action you clicked. The prompt or reply is placed in the composer of each chat you chose, including uploads of the files you included. In draft mode it is left there for review; otherwise that site's own Send button is clicked. The files and message are handled by that AI provider under its own privacy policy, exactly as if you had attached and typed them there yourself.
+
+For generated files, the extension uses the source site's download or export control and reads the resulting file in memory. This can request the file from that provider's file service under the page's normal access rules. The temporary download capture runs in the source page, has no extension APIs, and is removed after success, failure, or a 30-second timeout. It does not monitor downloads in other tabs.
 
 ## Where it is stored
 
@@ -23,7 +25,7 @@ Only to carry out the action you clicked. The prompt or reply is placed in the c
 
 ## What it does not do
 
-- It makes no network requests of its own and sends nothing to the developer or any third party.
+- It sends nothing to the developer, analytics services, or unrelated third parties. The only file requests are for the downloads you choose to share and uploads to your chosen AI chat.
 - It has no analytics, tracking, advertising, or remote code.
 - Your data is not sold, not used for advertising or to determine creditworthiness, not used for anything unrelated to the features above, and not read by people.
 

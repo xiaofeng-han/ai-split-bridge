@@ -68,3 +68,17 @@ test('popup-only actions are refused from chat pages and unknown pages', async t
   const foreign = await request({ type: 'ASB_LIST' }, { ...popup, id: 'another-extension' });
   assert.equal(foreign.ok, false);
 });
+
+test('generated files reach the chosen destination and file-only replies honor draft mode', async t => {
+  const { model, request } = await load(t, chatTabs(), { sync: { settings: { shareMode: 'draft' } } });
+  const files = [{ name: 'report.docx', data: 'AP8B', type: 'application/octet-stream' }];
+  const shared = await request({ type: 'ASB_SHARE', targetId: 2, reply: '', files });
+  assert.equal(shared.ok, true);
+  assert.deepEqual(model.messages('ASB_STAGE')[0].args[1].files, files);
+  assert.equal(model.messages('ASB_KEEP').length, 1);
+  assert.equal(model.messages('ASB_COMMIT').length, 0);
+  const before = model.messages().length;
+  const invalid = await request({ type: 'ASB_SHARE', targetId: 2, reply: 'Review.', files: [{ ...files[0], data: 'invalid' }] });
+  assert.equal(invalid.ok, false);
+  assert.equal(model.messages().length, before);
+});

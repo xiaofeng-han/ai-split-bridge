@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "AI Split Bridge",
-  "version": "0.6.3",
+  "version": "0.7.0",
   "description": "Send a prompt to two AI chats, share replies, and switch assistants in Chrome's native Split View.",
   "minimum_chrome_version": "140",
   "icons": {
@@ -43,6 +43,21 @@
         "https://grok.com/*"
       ],
       "js": [
+        "download-capture.js"
+      ],
+      "world": "MAIN",
+      "run_at": "document_start"
+    },
+    {
+      "matches": [
+        "https://chatgpt.com/*",
+        "https://chat.openai.com/*",
+        "https://claude.ai/*",
+        "https://gemini.google.com/*",
+        "https://grok.com/*"
+      ],
+      "js": [
+        "reply-files.js",
         "adapters.js",
         "content.js"
       ],
