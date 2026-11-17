@@ -34,6 +34,7 @@ h2 { margin: 0 0 8px 2px; color: var(--muted); font-size: 13px; font-weight: 500
 .row { display: flex; align-items: center; gap: 12px; min-height: 52px; padding: 8px 14px; }
 .row + .row, .row + .field { border-top: 1px solid var(--line); }
 .row > label:not(.grow) { width: 44px; flex: none; color: var(--muted); }
+.row.template-choice > label { width: auto; }
 .row.end { justify-content: flex-end; min-height: 56px; }
 .grow { flex: 1; min-width: 0; cursor: pointer; }
 .title { display: block; font-weight: 500; }

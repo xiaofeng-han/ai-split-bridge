@@ -193,33 +193,6 @@ test('a menu that fits on neither side opens on the roomier side and scrolls ins
   assert.equal(view.menu.style.maxHeight, '');
 });
 
-test('sharing lists generated files, reads them only on destination click, and supports an explicit text-only share', async t => {
-  const view = setup(t);
-  const descriptors = [{ name: 'report.docx' }];
-  const file = { name: 'report.docx', data: 'AP8B' };
-  let reads = 0;
-  view.adapter.replyText = () => ({ text: 'Here is the report.', partial: false, files: descriptors });
-  view.adapter.readReplyFiles = async files => { assert.equal(files, descriptors); reads++; return [file]; };
-  await settle();
-  const share = view.hosts('share')[0].shadowRoot.querySelector('.share-button');
-  await view.click(share);
-  assert.match(view.menu.textContent, /Include 1 generated file.*report.docx/);
-  assert.equal(reads, 0);
-  await view.click(view.row('Claude'));
-  assert.deepEqual(view.sent('ASB_SHARE')[0].files, [file]);
-  assert.equal(reads, 1);
-  await view.click(share);
-  await view.click(view.menu.querySelector('input[type="checkbox"]'));
-  await view.click(view.row('Claude'));
-  assert.equal(view.sent('ASB_SHARE')[1].files, undefined);
-  assert.equal(reads, 1);
-  view.adapter.readReplyFiles = async () => { throw new Error('The file expired. Nothing was sent.'); };
-  await view.click(share);
-  await view.click(view.row('Claude'));
-  assert.equal(view.sent('ASB_SHARE').length, 2, 'a failed file read must not silently send text');
-  assert.match(view.toast.textContent, /file expired/);
-});
-
 test('without Copy buttons the chooser can still share the latest reply', async t => {
   const view = setup(t);
   view.adapter.replyAnchors = () => [];
@@ -279,4 +252,130 @@ test('only explicit extension-owned adapter requests are accepted', async t => {
   view.adapter.insert = () => { throw Object.assign(new Error('Claude is still opening.'), { retry: true }); };
   const failure = await new Promise(resolve => view.listener({ type: 'ASB_INSERT', text: 'x' }, { id: 'extension' }, resolve));
   assert.deepEqual({ ...failure }, { ok: false, error: 'Claude is still opening.', retry: true });
+});
+
+function conversation(view) {
+  const replies = [...view.document.querySelectorAll('.reply')];
+  const prompt = view.document.createElement('article');
+  prompt.innerHTML = '<p>My original question.</p><div class="actions"><span class="copy"><button>Copy prompt</button></span><button>Edit</button></div>';
+  replies[0].before(prompt);
+  const entries = [
+    { element: prompt, role: 'user', text: 'My original question.' },
+    ...replies.map(element => ({ element, role: 'assistant', text: element.querySelector('p').textContent })),
+  ];
+  const reads = [];
+  view.adapter.messages = () => entries;
+  view.adapter.readMessages = async elements => {
+    reads.push(elements);
+    return { ok: true, text: elements.map(element => {
+      const entry = entries.find(item => item.element === element);
+      return `${entry.role === 'user' ? 'You' : 'ChatGPT'}: ${entry.text}`;
+    }).join('\n\n'), partial: false, conversation: true };
+  };
+  view.adapter.promptAnchors = () => prompt.isConnected ? [{ parent: prompt.querySelector('.actions'), before: prompt.querySelector('.copy').nextElementSibling, response: prompt }] : [];
+  view.adapter.readMessage = async element => ({ ok: true, text: element.querySelector('p').textContent, partial: false, prompt: true });
+  return { entries, reads, prompt };
+}
+
+test('historical prompts have a share action that preserves their role', async t => {
+  const view = setup(t);
+  const chat = conversation(view);
+  await view.refresh();
+  const host = view.hosts('share').find(node => node.dataset.shareRole === 'user');
+  assert.equal(host.previousSibling.className, 'copy');
+  await view.click(host.shadowRoot.querySelector('.share-button'));
+  assert.equal(view.menu.querySelector('.heading').textContent, 'Send this prompt to');
+  await view.click(view.row('Claude'));
+  assert.deepEqual(view.sent('ASB_SHARE'), [{type:'ASB_SHARE',targetId:2,reply:'My original question.',kind:'prompt'}]);
+  assert.equal(view.sent('ASB_SEND').length,0);
+  chat.prompt.remove();await view.refresh();
+  assert.equal(view.hosts('share').filter(node=>node.dataset.shareRole==='user').length,0);
+});
+
+test('selected prompts and replies are read in conversation order and shared as one conversation', async t => {
+  const view = setup(t);
+  const chat = conversation(view);
+  await view.refresh();
+  await view.click(view.pill().querySelector('.more'));
+  await view.click(view.menu.querySelector('.select-messages'));
+  const checks = [...view.menu.querySelectorAll('.message-choice input')];
+  assert.equal(checks.length,3);
+  assert.equal(view.menu.querySelector('.primary').disabled,true);
+  assert.equal(chat.reads.length,0);
+  // Click out of order; the transcript must still retain the conversation's order.
+  await view.click(checks[2]);await view.click(checks[0]);
+  assert.equal(view.menu.querySelector('.primary').textContent,'Share 2 messages…');
+  await view.click(view.menu.querySelector('.primary'));
+  assert.deepEqual([...chat.reads[0]],[chat.entries[0].element,chat.entries[2].element]);
+  assert.equal(view.menu.querySelector('.heading').textContent,'Send the selected messages to');
+  assert.equal(view.sent('ASB_SHARE').length,0,'choosing messages does not send');
+  await view.click(view.row('Gemini'));
+  assert.deepEqual(view.sent('ASB_SHARE'),[{type:'ASB_SHARE',targetId:3,reply:'You: My original question.\n\nChatGPT: Second answer.',kind:'conversation'}]);
+});
+
+test('select all, clear, and back never transfer messages', async t => {
+  const view=setup(t);conversation(view);await view.refresh();
+  await view.click(view.pill().querySelector('.more'));await view.click(view.menu.querySelector('.select-messages'));
+  const actions=[...view.menu.querySelectorAll('.selection-actions button')];
+  await view.click(actions[0]);assert.equal(view.menu.querySelectorAll('.message-choice input:checked').length,3);
+  await view.click(actions[1]);assert.equal(view.menu.querySelectorAll('.message-choice input:checked').length,0);
+  assert.equal(view.menu.querySelector('.primary').disabled,true);
+  await view.click(view.menu.querySelector('.footer .link'));
+  assert.equal(view.menu.querySelector('.heading').textContent,'Send this prompt to');
+  assert.equal(view.sent('ASB_SHARE').length,0);
+});
+
+test('changing conversations invalidates message selection before any read or send', async t => {
+  const view=setup(t);const chat=conversation(view);await view.refresh();
+  await view.click(view.pill().querySelector('.more'));await view.click(view.menu.querySelector('.select-messages'));
+  await view.click(view.menu.querySelector('.message-choice input'));
+  view.dom.window.history.pushState({},'', '/c/another');
+  await view.click(view.menu.querySelector('.primary'));
+  assert.equal(chat.reads.length,0);assert.equal(view.sent('ASB_SHARE').length,0);
+  assert.match(view.toast.textContent,/conversation changed/);
+});
+
+test('a message selection with generated files uses the existing file controls', async t => {
+  const view=setup(t);conversation(view);await view.refresh();
+  let fileReads=0;
+  view.adapter.readMessages=async()=>({ok:true,text:'You: question\nChatGPT: document',files:[{name:'draft.md'}],partial:false,conversation:true});
+  view.adapter.readReplyFiles=async()=>{fileReads++;return [{name:'draft.md',data:'dGVzdA==',type:'text/markdown'}];};
+  await view.click(view.pill().querySelector('.more'));await view.click(view.menu.querySelector('.select-messages'));
+  await view.click(view.menu.querySelector('.message-choice input'));await view.click(view.menu.querySelector('.primary'));
+  assert.match(view.menu.querySelector('.file-option').textContent,/Include 1 file/);
+  await view.click(view.row('Claude'));
+  assert.equal(fileReads,1);assert.equal(view.sent('ASB_SHARE')[0].files[0].name,'draft.md');
+  assert.equal(view.sent('ASB_SHARE')[0].kind,'conversation');
+});
+
+test('navigation while selected messages are being read discards the completed result', async t => {
+  const view=setup(t);conversation(view);await view.refresh();
+  let finish;
+  view.adapter.readMessages=()=>new Promise(resolve=>{finish=resolve;});
+  await view.click(view.pill().querySelector('.more'));await view.click(view.menu.querySelector('.select-messages'));
+  await view.click(view.menu.querySelector('.message-choice input'));await view.click(view.menu.querySelector('.primary'));
+  assert.equal(view.menu.querySelector('.primary').textContent,'Preparing…');
+  view.dom.window.history.pushState({},'', '/c/another');
+  finish({ok:true,text:'Old conversation',conversation:true});await settle();
+  assert.equal(view.menu.hidden,true);assert.equal(view.menu.querySelector('button.row'),null);
+  assert.match(view.toast.textContent,/conversation changed/);
+  assert.equal(view.sent('ASB_SHARE').length,0);
+  assert.equal(view.pill().querySelector('.send').disabled,false);
+});
+
+test('transparent neighbouring controls never supply invisible ink to the extension', async t => {
+  const view=setup(t);await settle();
+  view.document.querySelector('#site-send').style.cssText='color:rgba(255,255,255,0);background-color:transparent';
+  await view.refresh();
+  assert.equal(view.pill().querySelector('.root').style.getPropertyValue('--ink'),'');
+  assert.match(view.pill().querySelector('style').textContent,/color:var\(--fg\); -webkit-text-fill-color:currentColor/);
+});
+
+test('a site revealing a different composer control through attributes triggers remounting', async t => {
+  const view=setup(t);await settle();
+  const group=view.document.createElement('div');group.id='revealed-group';view.document.querySelector('form').append(group);
+  view.adapter.composerAnchor=()=>view.document.querySelector('#site-send').hidden ? {parent:group,before:null} : {parent:view.document.querySelector('#group'),before:view.document.querySelector('#site-send')};
+  view.document.querySelector('#site-send').hidden=true;
+  await new Promise(resolve=>setTimeout(resolve,300));
+  assert.equal(view.composer().parentNode,group);
 });

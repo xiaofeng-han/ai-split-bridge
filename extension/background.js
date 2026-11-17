@@ -7,11 +7,12 @@ const manager = createTabManager(chrome);
 const bridge = createBridge(chrome, manager);
 
 // The share message and mode are read here, never taken from the page, so a site cannot change what is sent.
-async function shareReply(source, choice, reply, files = []) {
+async function shareReply(source, choice, reply, files = [], kind = 'reply') {
+  if (!['reply', 'prompt', 'conversation'].includes(kind)) throw new Error('Choose a prompt, reply, or conversation to share.');
   validateFiles(files);
-  if (typeof reply !== 'string' || (!reply.trim() && !files.length)) throw new Error('This reply has no text or files to share.');
+  if (typeof reply !== 'string' || (!reply.trim() && !files.length)) throw new Error('This selection has no text or files to share.');
   const settings = await loadSettings(chrome.storage.sync);
-  const text = composeShare(settings.shareMessage, { assistant: PROVIDERS[providerFor(source.url)].name, reply });
+  const text = composeShare(settings, { assistant: PROVIDERS[providerFor(source.url)].name, reply, kind });
   return bridge.share(source.id, choice, text, { send: settings.shareMode === 'send', files });
 }
 
@@ -30,7 +31,7 @@ async function handle(message, sender) {
     return bridge.locked(source.windowId, () => {
       switch (message.type) {
         case 'ASB_SEND': return bridge.send(source.id, message.targetIds);
-        case 'ASB_SHARE': return shareReply(source, choice, message.reply, message.files);
+        case 'ASB_SHARE': return shareReply(source, choice, message.reply, message.files, message.kind);
         case 'ASB_SHOW': return bridge.show(source.id, choice);
         default: throw new Error('Unsupported chat action.');
       }

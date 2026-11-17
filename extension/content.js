@@ -73,6 +73,7 @@
     .root[data-provider=grok][data-theme=dark] { --bg:#1f1f1f; --fg:#fafafa; --muted:#a3a3a3; --line:rgba(255,255,255,.1);
       --hover:rgba(255,255,255,.07); --accent:#fafafa; --on-accent:#0a0a0a; --shadow:0 8px 30px rgba(0,0,0,.5); }
 
+    .root { font-family:var(--font,system-ui,sans-serif); color:var(--fg); -webkit-text-fill-color:currentColor; visibility:visible; }
     .composer,.share { display:inline-flex; align-items:center; }
     button { font:inherit; color:inherit; cursor:pointer; -webkit-font-smoothing:antialiased; }
     button:disabled { cursor:default; opacity:.45; }
@@ -92,11 +93,12 @@
 
     .menu,.toast { position:fixed; inset:auto; margin:0; border:var(--menu-border); background:var(--bg); color:var(--fg);
       box-shadow:var(--shadow); font-family:var(--font,system-ui,sans-serif); -webkit-font-smoothing:antialiased; }
-    .menu { width:304px; max-height:min(440px,calc(100vh - 24px)); overflow:auto; overscroll-behavior:contain; scrollbar-width:thin; scrollbar-color:color-mix(in srgb,currentColor 22%,transparent) transparent; padding:6px; border-radius:var(--menu-radius); font-size:14px; line-height:1.35; }
+    .menu { width:min(304px,calc(100vw - 16px)); max-height:min(440px,calc(100vh - 24px)); overflow-x:hidden; overflow-y:auto; overscroll-behavior:contain; scrollbar-width:thin; scrollbar-color:color-mix(in srgb,currentColor 22%,transparent) transparent; padding:6px; border-radius:var(--menu-radius); font-size:14px; line-height:1.35; }
     .heading { margin:0; padding:8px 10px 6px; font-size:12.5px; font-weight:500; color:var(--muted); }
     .item { display:flex; align-items:center; gap:2px; }
     .row { flex:1; min-width:0; display:flex; align-items:center; gap:10px; min-height:46px; padding:6px 10px; border:0; border-radius:var(--item-radius);
       background:none; color:inherit; text-align:left; }
+    .menu > .row { width:100%; }
     button.row:not(:disabled):hover,.show:hover,.link:hover { background:var(--hover); }
     .tick { width:18px; height:18px; flex:none; display:grid; place-items:center; color:var(--accent); }
     .tick .icon { width:18px; height:18px; stroke-width:2; visibility:hidden; }
@@ -114,6 +116,13 @@
     .file-option { display:flex; align-items:center; gap:7px; padding:6px 10px 2px; font-size:13px; color:var(--fg); cursor:pointer; }
     .file-option input { margin:0; accent-color:var(--accent); }
     .file-names { margin:0 10px 5px; padding:3px 0 9px; border-bottom:1px solid var(--line); color:var(--muted); font-size:12px; overflow-wrap:anywhere; }
+    .message-list { max-height:260px; overflow:auto; overscroll-behavior:contain; }
+    .message-choice { display:flex; align-items:flex-start; gap:9px; padding:9px 10px; border-radius:var(--item-radius); cursor:pointer; }
+    .message-choice:hover { background:var(--hover); }
+    .message-choice input { margin:3px 0 0; accent-color:var(--accent); flex:none; }
+    .message-choice .detail { white-space:normal; display:-webkit-box; -webkit-box-orient:vertical; -webkit-line-clamp:2; }
+    .selection-actions { display:flex; gap:4px; padding:0 6px 5px; }
+    .selection-actions .link { width:auto; margin:0; padding:5px 8px; font-size:12px; }
     .toast { max-width:340px; padding:11px 15px; border-radius:min(var(--menu-radius),14px); font-size:13.5px; line-height:1.45; }
     .toast.error { color:var(--danger); }
   `;
@@ -187,7 +196,12 @@
     else root.style.setProperty('--radius', (style.borderTopLeftRadius.endsWith('%') ? radius >= 50 : radius >= height / 2 - 1) ? '999px' : `${radius}px`);
     // A filled button (such as Send) has ink meant for its own background, so it is not borrowed.
     const clear = /^(transparent|rgba\(.*,\s*0\))$/.test(style.backgroundColor);
-    if (clear && style.color) root.style.setProperty('--ink', style.color); else root.style.removeProperty('--ink');
+    const [r, g, b, alpha] = (style.color.match(/[\d.]+/g) || []).map(Number);
+    const lightness = .299 * r + .587 * g + .114 * b;
+    const dark = (root.dataset.theme || appearance().theme) === 'dark';
+    const readable = dark ? lightness > 80 : lightness < 175;
+    if (clear && style.color && readable && style.color !== 'transparent' && (alpha === undefined || alpha > .25)) root.style.setProperty('--ink', style.color);
+    else root.style.removeProperty('--ink');
   }
   const list = names => names.length < 3 ? names.join(' and ') : `${names.slice(0, -1).join(', ')} and ${names.at(-1)}`;
   const capital = side => side[0].toUpperCase() + side.slice(1);
@@ -386,6 +400,14 @@
       });
       footer.append(latest);
     }
+    if (adapter.messages && adapter.readMessages) {
+      const select = button('link select-messages', 'Select messages…');
+      select.disabled = pending;
+      select.addEventListener('click', () => {
+        try { renderMessagePicker(); } catch (error) { closeLayer(menu); toast(pill, error.message, true); }
+      });
+      footer.append(select);
+    }
     footer.append(el('p', 'hint', `${SHORTCUT} sends to the checked chats`));
     menu.append(footer);
   }
@@ -416,11 +438,79 @@
 
   // ---------- Share a reply ----------
   const shares = new Map();
+  const prompts = new Map();
+
+  function renderMessagePicker() {
+    const messages = adapter.messages();
+    const page = location.href;
+    const picked = new Set();
+    menu.replaceChildren(el('p', 'heading', 'Select messages to share'));
+    const choices = el('div', 'message-list');
+    choices.setAttribute('role', 'group');
+    choices.setAttribute('aria-label', 'Conversation messages');
+    const controls = el('div', 'selection-actions');
+    const all = button('link', 'Select all');
+    const clear = button('link', 'Clear');
+    controls.append(all, clear);
+    const footer = el('div', 'footer');
+    const next = button('primary', 'Choose messages');
+    next.disabled = true;
+    const back = button('link', 'Back');
+    back.addEventListener('click', () => { renderSendMenu(); place(menu, menuAnchor, menuAbove); });
+    const update = () => {
+      next.disabled = pending || !picked.size;
+      next.textContent = picked.size ? `Share ${picked.size} message${picked.size === 1 ? '' : 's'}…` : 'Choose messages';
+    };
+    const checks = messages.map((message, index) => {
+      const row = el('label', 'message-choice');
+      const checkbox = el('input');
+      checkbox.type = 'checkbox';
+      const who = message.role === 'user' ? 'You' : adapter.name;
+      checkbox.setAttribute('aria-label', `${index + 1}. ${who}: ${message.text || 'Files'}`);
+      checkbox.addEventListener('change', () => {
+        if (checkbox.checked) picked.add(message.element); else picked.delete(message.element);
+        update();
+      });
+      row.append(checkbox, label(who, message.text || 'Files'));
+      choices.append(row);
+      return checkbox;
+    });
+    all.disabled = clear.disabled = !messages.length;
+    all.addEventListener('click', () => { messages.forEach((message, index) => { picked.add(message.element); checks[index].checked = true; }); update(); });
+    clear.addEventListener('click', () => { picked.clear(); checks.forEach(checkbox => { checkbox.checked = false; }); update(); });
+    next.addEventListener('click', async () => {
+      if (pending || !picked.size) return;
+      pending = true;
+      renderComposer();
+      checks.forEach(checkbox => { checkbox.disabled = true; });
+      all.disabled = clear.disabled = next.disabled = back.disabled = true;
+      next.textContent = 'Preparing…';
+      let reply;
+      try {
+        if (location.href !== page) throw new Error('This conversation changed. Open Select messages again.');
+        reply = await adapter.readMessages(messages.filter(message => picked.has(message.element)).map(message => message.element));
+        if (location.href !== page) throw new Error('This conversation changed. Open Select messages again.');
+      } catch (error) {
+        reply = null;
+        closeLayer(menu);
+        toast(menuAnchor, error.message, true);
+      } finally {
+        pending = false;
+        renderComposer();
+      }
+      if (reply) { renderShareMenu({ ...reply, conversation: true }); place(menu, menuAnchor, menuAbove); }
+    });
+    footer.append(next, back);
+    menu.append(controls, choices, el('p', 'hint', messages.length
+      ? 'Only messages currently loaded in this chat are listed. They keep their original order.'
+      : 'No messages are loaded in this chat yet.'), footer);
+    place(menu, menuAnchor, menuAbove);
+  }
 
   function renderShareMenu(reply) {
     const other = context.peer?.side;
     const draft = context.shareMode === 'draft';
-    const what = reply.partial ? 'the selected text' : 'this reply';
+    const what = reply.conversation ? 'the selected messages' : reply.prompt ? 'this prompt' : reply.partial ? 'the selected text' : 'this reply';
     menu.replaceChildren(el('p', 'heading', draft ? `Share ${what} with` : `Send ${what} to`));
     let includeFiles = true;
     if (reply.files?.length && !reply.partial) {
@@ -429,7 +519,7 @@
       checkbox.type = 'checkbox';
       checkbox.checked = true;
       checkbox.addEventListener('change', () => { includeFiles = checkbox.checked; });
-      option.append(checkbox, document.createTextNode(` Include ${reply.files.length} generated file${reply.files.length === 1 ? '' : 's'}`));
+      option.append(checkbox, document.createTextNode(` Include ${reply.files.length} ${reply.prompt || reply.conversation ? '' : 'generated '}file${reply.files.length === 1 ? '' : 's'}`));
       menu.append(option, el('p', 'file-names', reply.files.map(file => file.name).join(', ')));
     }
     const add = (name, detail, disabled, choice) => {
@@ -441,7 +531,8 @@
         closeLayer(menu);
         run(menuAnchor, async () => {
           const files = includeFiles && !reply.partial && reply.files?.length ? await adapter.readReplyFiles(reply.files) : [];
-          return request({ type: 'ASB_SHARE', ...choice, reply: reply.text, ...(files.length ? { files } : {}) });
+          const kind = reply.conversation ? 'conversation' : reply.prompt ? 'prompt' : undefined;
+          return request({ type: 'ASB_SHARE', ...choice, reply: reply.text, ...(kind ? { kind } : {}), ...(files.length ? { files } : {}) });
         });
       });
       menu.append(row);
@@ -457,18 +548,23 @@
     }
     menu.append(el('p', 'hint', draft
       ? 'Added as a draft for you to review and send.'
+      : reply.conversation ? 'Sent right away as conversation context.'
+      : reply.prompt ? 'Sent right away as your prompt.'
       : 'Sent right away with your share message.'));
   }
 
-  function shareHost(response) {
+  function shareHost(response, prompt = false) {
     const view = host('share');
     const trigger = button('share-button');
     trigger.append(icon('share'), el('span', '', 'Share with…'));
-    trigger.title = 'Share this reply with another chat';
+    view.node.dataset.shareRole = prompt ? 'user' : 'assistant';
+    trigger.title = prompt ? 'Share this prompt with another chat' : 'Share this reply with another chat';
     trigger.addEventListener('pointerdown', () => { dismissedBy = isOpen(menu) && menuAnchor === trigger ? trigger : null; });
     trigger.addEventListener('click', async () => {
+      if (pending) return;
       let reply;
-      try { reply = await (adapter.readReply ? adapter.readReply(response) : adapter.replyText(response)); } catch (error) { return toast(trigger, error.message, true); }
+      try { reply = await (prompt ? adapter.readMessage(response) : adapter.readReply ? adapter.readReply(response) : adapter.replyText(response)); } catch (error) { return toast(trigger, error.message, true); }
+      if (prompt) reply = { ...reply, prompt: true };
       toggleMenu(trigger, () => renderShareMenu(reply), false);
     });
     view.root.append(trigger);
@@ -500,17 +596,20 @@
   function mountShares(look) {
     const seen = new Set();
     const shown = canShare();
-    for (const { parent, before, response } of adapter.replyAnchors()) {
-      let view = shares.get(response);
-      if (!view) shares.set(response, view = shareHost(response));
-      seen.add(response);
+    const anchors = [...adapter.replyAnchors().map(anchor => ({ ...anchor, prompt: false })),
+      ...(adapter.promptAnchors?.() || []).map(anchor => ({ ...anchor, prompt: true }))];
+    for (const { parent, before, response, prompt } of anchors) {
+      const views = prompt ? prompts : shares;
+      let view = views.get(response);
+      if (!view) views.set(response, view = shareHost(response, prompt));
+      seen.add(view);
       if (view.node.parentNode !== parent || view.node.nextSibling !== before) parent.insertBefore(view.node, before);
       borrow(view.root, parent.querySelector('button'), [24, 44], '32px');
       view.node.style.cssText = shown ? 'display:inline-flex;align-items:center;flex:none' : 'display:none';
       paint(view.root, look);
     }
-    for (const [response, view] of shares) {
-      if (!seen.has(response)) { view.node.remove(); shares.delete(response); }
+    for (const views of [shares, prompts]) for (const [response, view] of views) {
+      if (!seen.has(view)) { view.node.remove(); views.delete(response); }
     }
   }
 
@@ -521,9 +620,10 @@
     mountShares(look);
   }
   let scanTimer = null;
-  new MutationObserver(() => {
+  new MutationObserver(records => {
+    if (records.every(record => record.type === 'attributes' && record.target.closest('[data-ai-split-bridge]'))) return;
     if (!scanTimer) scanTimer = setTimeout(() => { scanTimer = null; scan(); }, 250);
-  }).observe(document.documentElement, { childList: true, subtree: true });
+  }).observe(document.documentElement, { childList: true, subtree: true, attributes: true, attributeFilter: ['class', 'style', 'hidden', 'aria-hidden'] });
   addEventListener('scroll', () => {
     if (isOpen(menu) && menuAnchor) requestAnimationFrame(() => place(menu, menuAnchor, menuAbove));
   }, { capture: true, passive: true });

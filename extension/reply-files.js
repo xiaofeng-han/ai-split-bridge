@@ -4,8 +4,15 @@
   const MAX_FILES = 10;
   const MAX_BYTES = 32 * 1024 * 1024;
   const cleanName = value => String(value || 'generated-file').split(/[\\/]/).at(-1).replace(/[\x00-\x1f]/g, '').trim().slice(0, 255) || 'generated-file';
-  const label = node => node.getAttribute('aria-label') || node.textContent.trim();
-  const visible = node => !node.closest('[hidden], [inert], [aria-hidden="true"]') && getComputedStyle(node).display !== 'none';
+  const label = node => node.getAttribute('aria-label') || node.getAttribute('title') || node.textContent.trim();
+  const visible = node => {
+    if (!node.isConnected || node.closest('[hidden], [inert], [aria-hidden="true"]')) return false;
+    for (let parent = node; parent; parent = parent.parentElement) {
+      const style = getComputedStyle(parent);
+      if (style.display === 'none' || style.visibility === 'hidden') return false;
+    }
+    return true;
+  };
 
   function dialogs() {
     const roots = [document];
@@ -22,11 +29,17 @@
 
   // Only explicit downloads count. Ordinary citations, even links ending in .pdf, stay text.
   function list(scope) {
-    const files = [], seen = new Set();
+    const files = [], seen = new Set(), keys = new Map();
     const attribute = ['data-chatgpt-selection-message-id', 'data-message-id', 'data-turn-key'].find(name => scope.hasAttribute(name));
     const source = { element: scope, ...(attribute ? { attribute, value: scope.getAttribute(attribute) } : {}) };
     const add = (key, name, element, kind = 'download', matchName) => {
-      if (!seen.has(key)) { seen.add(key); files.push({ key, source, name: cleanName(name), element, kind, ...(matchName ? { matchName } : {}) }); }
+      // Distinct cards can legitimately have the same title (for example a
+      // revision of notes.md). Only deduplicate the same download control.
+      if (seen.has(element)) return;
+      seen.add(element);
+      const occurrence = keys.get(key) || 0;
+      keys.set(key, occurrence + 1);
+      files.push({ key: `${key}#${occurrence}`, identity: key, source, name: cleanName(name), element, kind, ...(matchName ? { matchName } : {}) });
     };
     for (const link of scope.querySelectorAll('a[href]')) {
       const href = link.getAttribute('href');
@@ -43,17 +56,26 @@
     // Claude's ordinary outputs (CSV, notebooks, archives, images, Office files,
     // source code, and others) have native file cards, independently of Docs.
     for (const card of scope.querySelectorAll('[data-testid="file-card-block"]')) {
-      const view = card.querySelector('button[data-testid="file-card-open"]');
+      // Compact cards use a span with role=button; the larger artifact card uses
+      // a native button. Both carry the same stable test id and accessible name.
+      const view = card.querySelector('[data-testid="file-card-open"]');
       if (!view || !visible(card)) continue;
       const title = label(view).replace(/^View /, '');
-      const download = [...card.querySelectorAll('button')].find(node => /^Download(?:\s|$)/i.test(label(node)));
+      const download = [...card.querySelectorAll('button, [role="button"], a[download]')].find(node =>
+        node.closest('[data-testid="file-card-block"]') === card
+        && (node.hasAttribute('download') || /^Download(?:\s|$)/i.test(label(node)))
+        && !/^Download all\b/i.test(label(node)));
       // The visible format label is just a filename hint. The actual download's
       // name and MIME type take precedence, with no restriction to these formats.
-      const extension = [...card.querySelectorAll('*')].filter(node => !node.closest('button'))
+      const extension = [...card.querySelectorAll('*')].filter(node => {
+        const control = node.closest('button, [role="button"]');
+        return !control || control === view;
+      })
         .map(node => node.textContent.trim()).map(text => text.match(/(?:^|[·•])\s*([A-Z][A-Z0-9]{0,11})$/)?.[1])
         .find(text => text && text !== title);
       const name = /\.[a-z0-9]{1,12}$/i.test(title) || !extension ? title : `${title}.${extension.toLowerCase()}`;
-      add(`file:${title}:${extension || card.getAttribute('data-sheet-kind')}`, name, download || view, download ? 'download' : 'unavailable', title);
+      const kind = download ? 'download' : card.getAttribute('data-sheet-kind') === 'markdown' ? 'claude-markdown' : 'unavailable';
+      add(`file:${title}:${extension || card.getAttribute('data-sheet-kind')}`, name, download || view, kind, title);
     }
     // Current ChatGPT resource cards put the file beside the markdown, with no href.
     for (const preview of scope.querySelectorAll('button[aria-label^="Open preview of "]')) {
@@ -79,14 +101,68 @@
     return files;
   }
 
-  async function waitFor(find) {
+  async function waitFor(find, message = 'The document export controls did not open.') {
     const end = Date.now() + 8000;
     do {
       const found = find();
       if (found) return found;
       await new Promise(resolve => setTimeout(resolve, 100));
     } while (Date.now() < end);
-    throw new Error('The document export controls did not open.');
+    throw new Error(message);
+  }
+
+  // Markdown artifacts have no inline Download button. Use the selected file's
+  // native viewer → More options → Download as MD, retaining its original bytes.
+  const panes = () => [...document.querySelectorAll('[data-testid="chat-side-pane"]')].filter(visible);
+  const fileTitle = text => String(text || '').replace(/\s*[·•]\s*(?:MD|Markdown)(?:\s+controls)?\s*$/i, '').trim().toLowerCase();
+  function markdownViewer(title) {
+    const matches = panes().flatMap(pane => [...pane.querySelectorAll('[role="toolbar"]')]
+      .filter(toolbar => fileTitle(toolbar.getAttribute('aria-label')) === fileTitle(title)
+        || [...toolbar.querySelectorAll('h1, h2, h3, [role="heading"]')].some(heading => fileTitle(heading.textContent) === fileTitle(title)))
+      .map(toolbar => ({ pane, toolbar })));
+    return matches.length === 1 ? matches[0] : null;
+  }
+
+  async function markdownDownload(file, cleanup) {
+    const title = file.matchName;
+    const selected = () => file.element.getAttribute('aria-pressed') === 'true' || file.element.getAttribute('aria-current') === 'true';
+    // Titles can repeat across revisions. A matching heading alone does not
+    // prove the viewer belongs to this card; the card must also be selected.
+    let viewer = selected() ? markdownViewer(title) : null;
+    if (!viewer) {
+      const before = panes();
+      const previous = [...document.querySelectorAll('[data-testid="file-card-open"][aria-pressed="true"], [data-testid="file-card-open"][aria-current="true"]')]
+        .find(node => visible(node) && markdownViewer(label(node).replace(/^View /, '')));
+      file.element.click();
+      cleanup.viewer = () => {
+        const current = markdownViewer(title);
+        if (!current || !selected()) return; // The user has since chosen a different file.
+        if (previous?.isConnected) previous.click();
+        else if (!before.length) [...current.toolbar.querySelectorAll('button')].find(node => label(node) === 'Close')?.click();
+      };
+      viewer = await waitFor(() => selected() && markdownViewer(title), 'The selected Markdown file did not open in Claude’s viewer.');
+    }
+    const more = [...viewer.toolbar.querySelectorAll('button, [role="button"]')].find(node => label(node) === 'More options');
+    if (!more || more.disabled || more.getAttribute('aria-disabled') === 'true') throw new Error('The Markdown viewer has no available More options control.');
+    const menuBefore = [...document.querySelectorAll('[role="menu"]')].filter(visible);
+    const ownMenu = () => {
+      const id = more.getAttribute('aria-controls');
+      const controlled = id && document.getElementById(id);
+      if (id) return controlled?.matches('[role="menu"]') && visible(controlled) ? controlled : null;
+      const opened = [...document.querySelectorAll('[role="menu"]')].filter(node => visible(node) && !menuBefore.includes(node));
+      return opened.length === 1 ? opened[0] : null;
+    };
+    if (!ownMenu()) {
+      if (menuBefore.length) throw new Error('Close the open menu before sharing this Markdown file.');
+      more.click();
+      cleanup.menu = () => { if (more.isConnected && ownMenu() && more.getAttribute('aria-expanded') === 'true') more.click(); };
+    }
+    return waitFor(() => {
+      if (!selected() || markdownViewer(title)?.pane !== viewer.pane) throw new Error('The selected Markdown viewer changed before download.');
+      const menu = ownMenu();
+      return menu && [...menu.querySelectorAll('[role="menuitem"], button')].find(node =>
+        /^Download as (MD|Markdown)$/i.test(label(node)) && !node.disabled && node.getAttribute('aria-disabled') !== 'true');
+    }, 'Claude did not offer Download as MD for this file.');
   }
 
   async function expand(scope) {
@@ -112,7 +188,11 @@
       .find(node => node.getAttribute(source.attribute) === source.value) : source.element;
     if (!scope?.isConnected) throw new Error('The reply changed. Open Share again.');
     await expand(scope);
-    const current = list(scope).find(item => item.key === file.key);
+    const available = list(scope);
+    // Reordering equal-name cards must not silently change the selected file.
+    const matches = available.filter(item => item.identity === file.identity);
+    const current = available.find(item => item.element === file.element)
+      || (matches.length === 1 ? matches[0] : !file.identity ? available.find(item => item.key === file.key) : null);
     if (!current) throw new Error('The file is no longer in this reply. Open Share again.');
     return current;
   }
@@ -153,6 +233,7 @@
     let total = 0;
     for (const file of files) {
       let dialog;
+      const cleanup = {};
       try {
         if (pageKey() !== page) throw new Error('The reply changed. Open Share again.');
         const current = await currentFile(file);
@@ -169,6 +250,9 @@
           exportTab.click();
           download = await waitFor(() => [...dialog.querySelectorAll('button')].find(node => /^Word\b/.test(label(node)) && /\.docx/.test(label(node))));
         }
+        if (current.kind === 'claude-markdown') download = await markdownDownload(current, cleanup);
+        if (pageKey() !== page) throw new Error('The reply changed. Open Share again.');
+        await currentFile(file);
         const copy = await capture(download, file.name, file.matchName);
         if (pageKey() !== page) throw new Error('The reply changed while its file was being read.');
         await currentFile(file);
@@ -179,6 +263,10 @@
       } catch (error) {
         throw new Error(`Nothing was sent. ${file.name}: ${error.message} Download and attach this file manually, or uncheck generated files to share text only.`);
       } finally {
+        if (pageKey() === page) {
+          cleanup.menu?.();
+          cleanup.viewer?.();
+        }
         // Close only the export dialog opened by this action.
         [...(dialog?.querySelectorAll('button') || [])].find(node => label(node) === 'Close')?.click();
       }

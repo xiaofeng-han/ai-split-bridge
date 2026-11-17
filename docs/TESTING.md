@@ -8,7 +8,7 @@ Run `npm run preview` and open `http://127.0.0.1:4173`.
 
 - **Provider links**: each page imitates that site’s replies, composer, colours, and button shapes, and runs the real adapter and controls. Use them to check that the controls blend in with each site.
 - **Dark** and **No split**: switch the page’s theme and split state.
-- **Run editor checks**: covers multiline insertion, input events, rollback, duplicate-click protection, draft insertion, where the controls attach, link and tool chips, and copying an attachment into the composer once and removing it again. It also reads a generated file from the second reply, compares its bytes, uploads it and keeps it as a draft. ChatGPT uses a sibling PDF card with a blob download; Claude exports a synthetic Word document through a same-origin artifact frame; Gemini and Grok use explicit PDF download links. You can also paste or drop real files into the fixture composer to see its attachment tiles.
+- **Run editor checks**: covers multiline insertion, input events, rollback, duplicate-click protection, draft insertion, where the controls attach, link and tool chips, and copying an attachment into the composer once and removing it again. You can also paste or drop real files into the fixture composer to see its attachment tiles.
 - **Popup**: shows the real popup, including the share settings. Settings are kept for the fixture tab only.
 - **Bottom box**: shows the message the extension would have sent.
 
@@ -17,9 +17,15 @@ The fixture substitutes host detection and mocks extension messaging. It does no
 ## Controls appear in the right places
 
 1. Open two AI chats in a native split (right-click a tab → Split View). On each side, confirm **Send both** sits just left of the site’s own Send or mic button. Confirm it looks like part of the composer: about the same height and corner shape as the site’s own buttons, in the site’s colours (for example Claude’s orange or Gemini’s blue for the menu’s Send button).
-2. After a reply finishes, confirm **Share with…** sits in that reply’s toolbar, right after its Copy button (or before ⋯ More if the reply has no Copy). Your own messages and code blocks must not get one. A reply still being written gets one when it finishes.
+2. After a reply finishes, confirm **Share with…** sits in that reply’s toolbar, right after its Copy button (or before ⋯ More if the reply has no Copy). Your own messages with a recognized Copy toolbar should also get one; individual code-block toolbars must not. A reply still being written must not be shareable until it finishes.
 3. Close all other AI tabs. Confirm both controls disappear. Open another AI tab and confirm they come back within a second or two.
 4. Switch a site between light and dark, and try a narrow or short pane. Menus should open on the side with more room and scroll rather than cover their own button. Report any control that overlaps, clips, or wraps badly, with the provider and a screenshot.
+
+## Project and new-chat composers
+
+1. Open a ChatGPT project landing page with another AI chat open. Before sending its first message, confirm **Send both** appears beside the project composer’s controls. Type a harmless prompt and send to both; confirm each chat receives it once. Project instructions and stored project files are not copied.
+2. Open Claude’s new-chat page directly, then reach it again through the site’s New chat action. Confirm **Send both** is visible and clickable beside the composer controls, with no empty reserved gap or clipped button. Repeat with the sidebar expanded and collapsed, a narrow split, and both themes.
+3. Navigate from a conversation to a new chat or project and back without reloading. Confirm the old composer control disappears and exactly one control appears on the current composer. Repeat after refreshing each page.
 
 ## Send both / Send all
 
@@ -47,18 +53,30 @@ Use `tests/fixtures/bridge-test-a.pdf` and `bridge-test-b.pdf`; both contain syn
 ## Share
 
 1. With the default setting (**Send right away** on), click **Share with…** in a reply’s toolbar and choose the chat on the other side. Confirm it is sent there exactly once, wrapped in the default message, and that nothing is sent in this chat.
-2. In the popup, change **Message with the shared reply**, for example to `{assistant} said: {reply} Find the mistakes.` (the **{assistant}** and **{reply}** buttons insert those at the cursor). Close and reopen the popup to confirm it was saved. Share again and confirm your words arrive with the assistant’s name and reply filled in. Remove `{reply}` and confirm the reply goes at the end. Click **Reset** to restore the default.
+2. In the popup, choose **Message for → Replies** and change **Message with the shared reply**, for example to `{assistant} said: {reply} Find the mistakes.` (the **{assistant}** and **{reply}** buttons insert those at the cursor). Close and reopen the popup to confirm it was saved. Share again and confirm your words arrive with the assistant’s name and reply filled in. Remove `{reply}` and confirm the reply goes at the end. Click **Reset** to restore the default.
 3. Turn off **Send right away** in the popup. Share again and confirm the menu says it adds a draft, the draft appears, and it is **not** sent. Send it with that site’s own button.
 4. Select part of an older reply, then click that reply’s **Share with…**. Confirm only the selection is shared and the heading mentions “the selected text”.
 5. Choose a chat from another tab. Confirm it appears on the other side and then receives the message. In navigation mode, confirm the conversation that was there comes back when you show it again from the arrow menu.
 6. Choose an assistant that isn’t open. Confirm it opens on the other side and receives the message after loading.
 7. Share into a nonempty composer, or into a chat that is still replying. Confirm nothing is sent, the original draft survives, and an error explains why.
 8. Exchange replies without waiting: share ChatGPT’s reply with Claude, then, while Claude is still writing its answer, click **Share with…** on Claude’s previous reply and choose ChatGPT. Confirm it is sent to ChatGPT right away. **Share with…** on a reply that is still being written, or being regenerated, must still say to wait.
-9. Generate a small Word document or PDF with a synthetic token that appears only in the file. Share that reply. Confirm the menu lists the filename with **Include generated files** checked, the destination receives one attachment, and its answer can read the token. Repeat with ChatGPT’s native file card and a Claude Docs card; Claude Docs should open Export, select Word and close its export dialog. It shares the current saved document, including later edits.
-10. Repeat in draft mode. Confirm the uploaded file and text remain in the destination, with no submission. Manually send or remove the draft, then try an empty reply containing only a generated file.
-11. Uncheck generated files and share again: only text should arrive. Select part of the reply and confirm no file is included. Ordinary PDF citations must stay links and should not be downloaded as generated output.
-12. Try an expired download, a file over 20 MB, over 32 MB of combined files, and a destination that rejects the upload. Confirm nothing is submitted and the error explains what could not be copied. Verify ordinary native downloads still work after a successful share and after a failure. Open an unrelated dialog before sharing a Claude Doc and confirm it is preserved.
-13. In Claude, generate CSV and JSON files with the same display title, an `.ipynb` notebook, and a ZIP. Confirm all four native file cards appear in Share and arrive separately with their original filenames. A notebook served as JSON must remain an `.ipynb`; it must not be rejected as an error page. Repeat in the other direction with Word, Excel, PowerPoint, PDF, and PNG outputs. Ask the receiving AI to read a marker present only inside each file, and check that it was absent from the shared reply text.
+
+## Share prompts and selected messages
+
+1. Click **Share with…** beside Copy on one of your sent prompts. Confirm the destination receives it as **my prompt**, not as an assistant’s reply. A custom reply template must not be applied. Highlight a portion first and confirm only that text is shared.
+2. In the composer’s arrow menu, choose **Select messages…**. Select alternating prompts and replies in reverse order, then share. Confirm they arrive in their original conversation order, with **You:** and the source assistant’s name identifying each speaker, and a neutral request to continue from this context.
+3. Try **Select all**, **Clear**, and **Back**. Only loaded messages should appear. Navigate away while a selection is being prepared: the action must stop rather than share a different conversation. An unfinished selected reply must block sharing.
+4. Repeat in draft mode and with a nonempty destination. Draft mode must leave the shared context unsent; an existing destination draft must be preserved. Past prompt attachments are not copied by message selection; attach those files again in the current composer if needed.
+5. In the popup, choose **Message for → Selected messages**. Replace “Please continue from this context” with a distinctive instruction, keeping `{content}`. Share several messages and confirm the instruction and full transcript arrive. Repeat with **My prompts**. Quickly switch between types and change **Send right away** while editing: each message must keep its own saved text. Reopen the popup to check persistence; **Reset** must affect only the chosen type.
+
+## Share generated files
+
+Test a mixed Claude reply containing one large Markdown artifact card, two compact Markdown rows, a DRAWIO file, and a ZIP. The share menu should list all five. The large artifact should export through its own viewer’s **More options → Download as MD**, and the four compact rows should use their individual downloads. **Download all** must not be used. Check that an already-open viewer is preserved or restored and that changing the viewer during capture does not get undone. Use destinations that accept the included file types; a rejected upload must stop submission.
+
+1. Ask Claude to generate two separate Markdown files with different verification tokens, plus a short explanation. In the completed reply’s **Share with…** menu, confirm both filenames and the checked **Include generated files** option appear, even when the cards sit outside the reply’s text block. Share to an empty chat and confirm both file contents arrive, with no duplicate or missing file. Repeat with two cards sharing the same title.
+2. Uncheck the files option and share again: only the rendered text should arrive. Highlight an excerpt first and confirm no generated files are included. Select several replies containing generated files through **Select messages…** and confirm all listed files belong to the selected replies.
+3. Try a removed or unreadable download, and a file a destination refuses. The share must stop with an explanation rather than send incomplete context. Repeat in draft mode: uploads may reach the destination provider, but the chat must not submit.
+4. Check recognized generated download cards from the other providers too. Ordinary citation links and original attachments from old user prompts must not be treated as generated downloads. Repeat after refreshing the source tab following an extension reload.
 
 ## Show on the other side
 
@@ -74,15 +92,3 @@ Use `tests/fixtures/bridge-test-a.pdf` and `bridge-test-b.pdf`; both contain syn
 2. Reload the extension and refresh the AI pages. Confirm each control appears exactly once. If a control stops responding, check the extension’s errors on `chrome://extensions`.
 
 Repeat sending and sharing with all four providers as both source and destination. Account layouts and locales can expose selector differences. Report the provider, visible error, and the changed control markup, without private conversation contents.
-
-## Recorded live checks — 23 October 2026
-
-Version 0.7.0 was loaded into the installed unpacked extension, and the disposable test tabs were refreshed. Tests used synthetic data only.
-
-| Source → destination | Files | Verified result |
-| --- | --- | --- |
-| Claude → ChatGPT | CSV, JSON, IPYNB, ZIP | Four separate attachments; the receiver read all four markers, including the notebook cell and the text file inside the ZIP. |
-| ChatGPT → Claude | DOCX, XLSX, PPTX, PDF, PNG | Five separate attachments; the receiver read all five markers, including the text drawn only in PNG pixels. ChatGPT’s collapsed file list expanded automatically. |
-| Claude Docs → ChatGPT | Native Docs card exported as DOCX | The bridge used the native export dialog, uploaded the Word copy, and the receiver read its marker. |
-
-Markers were absent from the shared reply text. Claude’s tools referred to the PNG internally as `image.png`, while its user-message attachment card retained `bridge-image.png`. These are content-access checks; the byte-for-byte checks remain in the local fixtures. Live tests also exposed and fixed native control redraws during download and an installed extension pointing at an older repository copy. In Chrome’s extension Details, verify both **Version** and **Loaded from** when reproducing an issue.

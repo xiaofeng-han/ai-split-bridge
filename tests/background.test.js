@@ -41,7 +41,7 @@ test('a chat page acts only as itself: it can reach other open chats but never s
   const shared = await request({ type: 'ASB_SHARE', targetId: 2, reply: 'Review this.' });
   assert.deepEqual([shared.ok, shared.message], [true, 'Sent to Claude.']);
   assert.equal(model.messages('ASB_PREPARE').at(-1).args[1].text,
-    "Here is ChatGPT's reply:\n\nReview this.\n\nWhat do you think? Point out anything wrong or missing.");
+    "Here is ChatGPT's reply:\n\nReview this.\n\nWhat do you think? Please review it critically. Point out anything wrong, weak, or missing.\n\nIf there are good ideas, use them to improve your previous response. Do not just agree with it—use your own judgement.");
   assert.deepEqual(model.messages('ASB_COMMIT').map(call => call.args[0]).sort(), [1, 2, 3]);
 });
 
@@ -53,6 +53,53 @@ test('your share settings decide whether a shared reply is sent or drafted, and 
   assert.equal(model.messages('ASB_COMMIT').length, 0, 'draft mode never sends');
   assert.deepEqual(model.messages('ASB_INSERT').map(call => [call.args[0], call.args[1].text]),
     [[2, 'Find the flaws in ChatGPT’s answer:\nThe answer is 42.']]);
+});
+
+test('sharing prompts and conversations labels authors accurately and respects draft mode', async t => {
+  const { model, request } = await load(t, chatTabs(), { sync: { settings: { shareMode: 'draft', shareMessage: 'Critique {assistant}’s answer: {reply}' } } });
+  const prompt = 'Please explain this example.';
+  assert.equal((await request({ type: 'ASB_SHARE', targetId: 2, reply: prompt, kind: 'prompt' })).ok, true);
+  assert.equal(model.messages('ASB_INSERT').at(-1).args[1].text,
+    `Here is my prompt from a chat with ChatGPT:\n\n${prompt}\n\nPlease respond to this prompt.`);
+  const transcript = 'You:\nA question\n\nChatGPT:\nAn answer\n\nYou:\nA follow-up';
+  assert.equal((await request({ type: 'ASB_SHARE', targetId: 2, reply: transcript, kind: 'conversation' })).ok, true);
+  assert.equal(model.messages('ASB_INSERT').at(-1).args[1].text,
+    `Here are selected messages from my conversation with ChatGPT:\n\n${transcript}\n\nPlease continue from this context.`);
+  assert.equal(model.messages('ASB_COMMIT').length, 0);
+  const count = model.messages().length;
+  for (const kind of ['system', 'user', '', null, {}]) {
+    const result = await request({ type: 'ASB_SHARE', targetId: 2, reply: 'Text', kind });
+    assert.equal(result.ok, false);
+    assert.match(result.error, /Choose a prompt, reply, or conversation/);
+  }
+  assert.equal(model.messages().length, count, 'unsupported kinds never touch a destination');
+});
+
+test('conversation shares preserve generated files and the selected delivery mode', async t => {
+  const { model, request } = await load(t, chatTabs(), { sync: { settings: { shareMode: 'draft' } } });
+  const files = [{ name: 'notes.md', type: 'text/markdown', data: btoa('# Notes') }];
+  const result = await request({ type: 'ASB_SHARE', targetId: 2, kind: 'conversation', reply: 'You:\nWrite notes\n\nChatGPT:\nHere are the notes.', files });
+  assert.equal(result.ok, true);
+  assert.deepEqual(model.messages('ASB_STAGE').at(-1).args[1].files, files);
+  assert.match(model.messages('ASB_STAGE').at(-1).args[1].text, /^Here are selected messages from my conversation with ChatGPT:/);
+  assert.equal(model.messages('ASB_KEEP').length, 1);
+  assert.equal(model.messages('ASB_COMMIT').length, 0);
+});
+
+test('custom prompt and conversation instructions from settings reach the chosen chat', async t => {
+  const { model, request } = await load(t, chatTabs(), { sync: { settings: {
+    shareMode: 'draft', shareMessage: 'Reply only: {reply}',
+    promptMessage: 'Explain my question:\n{content}\nUse a short example.',
+    conversationMessage: 'Conversation with {assistant}:\n{content}\nCheck the assumptions before continuing.',
+  } } });
+  const prompt = 'How does this work?';
+  assert.equal((await request({ type: 'ASB_SHARE', targetId: 2, kind: 'prompt', reply: prompt })).ok, true);
+  assert.equal(model.messages('ASB_INSERT').at(-1).args[1].text, `Explain my question:\n${prompt}\nUse a short example.`);
+  const conversation = 'You:\nA question\n\nChatGPT:\nAn answer';
+  assert.equal((await request({ type: 'ASB_SHARE', targetId: 2, kind: 'conversation', reply: conversation })).ok, true);
+  assert.equal(model.messages('ASB_INSERT').at(-1).args[1].text,
+    `Conversation with ChatGPT:\n${conversation}\nCheck the assumptions before continuing.`);
+  assert.equal(model.messages('ASB_COMMIT').length, 0, 'custom instructions preserve draft mode');
 });
 
 test('popup-only actions are refused from chat pages and unknown pages', async t => {
@@ -67,18 +114,4 @@ test('popup-only actions are refused from chat pages and unknown pages', async t
   assert.equal(list.peer.id, 2);
   const foreign = await request({ type: 'ASB_LIST' }, { ...popup, id: 'another-extension' });
   assert.equal(foreign.ok, false);
-});
-
-test('generated files reach the chosen destination and file-only replies honor draft mode', async t => {
-  const { model, request } = await load(t, chatTabs(), { sync: { settings: { shareMode: 'draft' } } });
-  const files = [{ name: 'report.docx', data: 'AP8B', type: 'application/octet-stream' }];
-  const shared = await request({ type: 'ASB_SHARE', targetId: 2, reply: '', files });
-  assert.equal(shared.ok, true);
-  assert.deepEqual(model.messages('ASB_STAGE')[0].args[1].files, files);
-  assert.equal(model.messages('ASB_KEEP').length, 1);
-  assert.equal(model.messages('ASB_COMMIT').length, 0);
-  const before = model.messages().length;
-  const invalid = await request({ type: 'ASB_SHARE', targetId: 2, reply: 'Review.', files: [{ ...files[0], data: 'invalid' }] });
-  assert.equal(invalid.ok, false);
-  assert.equal(model.messages().length, before);
 });

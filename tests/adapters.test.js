@@ -529,6 +529,74 @@ test("no composer means no composer anchor", (t) => {
   assert.equal(fixture.adapter.composerAnchor(), null);
 });
 
+test("ChatGPT project composer can send before the first chat exists", async t => {
+  const fixture = setup("chatgpt", { url: "https://chatgpt.com/g/g-p-project/project", body: `<main>
+    <div><div contenteditable='true' data-composer-markdown data-placeholder='New chat in Research'></div>
+    <div id='controls'><button aria-label='Start dictation'></button><button data-composer-submit aria-label='Send prompt'></button></div></div></main>` });
+  t.after(fixture.close);
+  fixture.setDraft("Start this project conversation.");
+  assert.equal(fixture.adapter.composerAnchor().parent.id, "controls");
+  assert.equal((await fixture.adapter.readPrompt()).text, "Start this project conversation.");
+});
+
+test("Claude new-chat controls avoid hidden transition slots and remain anchored after input", t => {
+  const fixture = setup("claude", { url: "https://claude.ai/new", body: `<fieldset>${fixtures.claude.editor}
+    <div id='controls'><span id='send-slot' style='opacity:0'><button aria-label='Send message'></button><i></i></span>
+    <button id='voice' aria-label='Use voice mode'></button></div></fieldset>` });
+  t.after(fixture.close);
+  const doc = fixture.window.document;
+  assert.equal(fixture.adapter.composerAnchor().parent.id, "controls");
+  doc.querySelector("#send-slot").style.opacity = "1";
+  doc.querySelector("#voice").hidden = true;
+  const anchor = fixture.adapter.composerAnchor();
+  assert.ok(anchor.parent.isConnected);
+  assert.notEqual(fixture.window.getComputedStyle(anchor.parent).opacity, "0");
+});
+
+const claudeSections = n => `<section id='claude-${n}'>
+  <div data-testid='assistant-message' class='font-claude-response'><p>First section ${n}.</p></div>
+  <div class='file-card-block' data-file='plan.md'><button>Download plan</button></div>
+  <div class='font-claude-response'><p>Second section ${n}.</p></div>
+  <div class='file-card-block' data-file='rubric.md'><button>Download rubric</button></div>
+  <div class='font-claude-response'><p>Final section ${n}.</p></div>
+  <div class='actions'><button aria-label='Copy'></button><button aria-label='Give positive feedback'></button></div></section>`;
+
+test("Claude sharing collects all Markdown blocks and generated files in one turn", async t => {
+  const fixture = setup("claude", { body: `<main><div data-testid='user-message'>Question one</div>${claudeSections(1)}
+    <div data-testid='user-message'>Question two</div>${claudeSections(2)}</main><form>${fixtures.claude.editor}</form>` });
+  t.after(fixture.close);
+  const expanded = [];
+  fixture.window.AISplitReplyFiles = {
+    list: scope => [...scope.querySelectorAll("[data-file]")].map(node => ({ name: node.dataset.file, source: node })),
+    expand: async scope => expanded.push(scope.id),
+  };
+  const anchors = fixture.adapter.replyAnchors();
+  assert.equal(anchors.length, 2);
+  const first = await fixture.adapter.readReply(anchors[0].response);
+  assert.equal(first.text, "First section 1.\n\nSecond section 1.\n\nFinal section 1.");
+  assert.deepEqual(Array.from(first.files, file => file.name), ["plan.md", "rubric.md"]);
+  assert.deepEqual(expanded, ["claude-1"]);
+  assert.equal(fixture.adapter.getResponse().text, "First section 2.\n\nSecond section 2.\n\nFinal section 2.");
+  const selection = fixture.window.getSelection(), range = fixture.window.document.createRange();
+  range.selectNodeContents(anchors[0].response.querySelectorAll("p")[1]);
+  selection.addRange(range);
+  const part = await fixture.adapter.readReply(anchors[0].response);
+  assert.equal(part.text, "Second section 1.");
+  assert.equal(part.partial, true);
+  assert.equal(part.files, undefined);
+});
+
+test("multiple Claude Markdown segments do not make an unfinished reply shareable", async t => {
+  const fixture = setup("claude", { body: `<main>${claudeSections(1)}</main><form>${fixtures.claude.editor}
+    <button aria-label='Stop response'></button></form>` });
+  t.after(fixture.close);
+  const firstBlock = fixture.window.document.querySelector(".font-claude-response");
+  assert.throws(() => fixture.adapter.replyText(firstBlock), /still responding/);
+  fixture.window.document.querySelector(".actions").remove();
+  assert.throws(() => fixture.adapter.replyText(firstBlock), /still responding/, "no action bar while streaming");
+  await assert.rejects(fixture.adapter.readMessages([fixture.adapter.messages()[0].element]), /still responding/);
+});
+
 test("each finished reply gets one Share anchor in its own action bar after Copy, never a code block's", (t) => {
   const turn = (id, text) => `<article><div data-message-author-role='assistant'><div class='markdown'><p>${text}</p><pre><button aria-label='Copy'>Copy code</button>x = 1</pre></div></div><div class='actions'><span id='${id}'><button data-testid='copy-turn-action-button' aria-label='Copy'></button></span><button aria-label='Good response'></button></div></article>`;
   const user = "<article><div data-message-author-role='user'>Question</div><div><button data-testid='copy-turn-action-button' aria-label='Copy'></button></div></article>";
@@ -588,6 +656,54 @@ const writing = {
   gemini: { prompt: "<user-query><p>Shared reply</p></user-query>", reply: "<model-response><div class='model-response-text'><p>Still writ</p></div></model-response>" },
   grok: { reply: "<div><div data-testid='assistant-message'><p>Still writ</p></div></div>" },
 };
+
+for (const [provider, turn] of Object.entries({ ...replyLayouts, claude: writing.claude.turn })) {
+  test(`${provider}: share selected prompts and replies in conversation order with speaker labels`, async t => {
+    const fixture = setup(provider, { body: `<main>${turn(1)}${turn(2)}</main><form>${fixtures[provider].editor}</form>` });
+    t.after(fixture.close);
+    const entries = fixture.adapter.messages();
+    assert.deepEqual(Array.from(entries, entry => entry.role), ["user", "assistant", "user", "assistant"]);
+    assert.equal(entries[0].text, "Question 1?");
+    const prompt = await fixture.adapter.readMessage(entries[0].element);
+    assert.equal(prompt.prompt, true);
+    assert.equal(prompt.text, "Question 1?");
+    const range = fixture.window.document.createRange();
+    range.selectNodeContents(entries[1].element.querySelector("p"));
+    fixture.window.getSelection().addRange(range);
+    const result = await fixture.adapter.readMessages([entries[3].element, entries[0].element, entries[1].element, entries[0].element]);
+    assert.equal(result.conversation, true);
+    assert.equal(result.partial, false);
+    assert.ok(result.text.startsWith(`You:\nQuestion 1?\n\n---\n\n${fixture.adapter.name}:\nAnswer 1 here.`));
+    assert.match(result.text, /Answer 2 here\./);
+    assert.doesNotMatch(result.text, /Question 2/);
+    if (provider === "chatgpt") assert.match(result.text, /A \| B\n1 \| 2/, "selection includes whole checked reply, not just highlighted paragraph");
+    if (provider !== "claude") assert.equal(fixture.adapter.promptAnchors().length, 2);
+    entries[0].element.remove();
+    await assert.rejects(fixture.adapter.readMessages([entries[0].element]), /no longer on the page/);
+    await assert.rejects(fixture.adapter.readMessages([]), /at least one/);
+  });
+}
+
+test("selected messages abort if the conversation navigates while expanding files", async t => {
+  const fixture = setup("claude", { body: `<main>${claudeSections(1)}</main><form>${fixtures.claude.editor}</form>` });
+  t.after(fixture.close);
+  fixture.window.AISplitReplyFiles = { list: () => [], expand: async () => fixture.window.history.pushState({}, "", "/new") };
+  await assert.rejects(fixture.adapter.readMessages([fixture.adapter.messages()[0].element]), /conversation changed/);
+});
+
+test("Claude selected messages stay stable when native reply actions fade out on mouseleave", async t => {
+  const fixture = setup("claude", { body: `<main>${writing.claude.turn(1)}</main><form>${fixtures.claude.editor}</form>` });
+  t.after(fixture.close);
+  const before = fixture.adapter.messages();
+  const bar = fixture.adapter.replyAnchors()[0].parent;
+  bar.style.opacity = "0";
+  const after = fixture.adapter.messages();
+  assert.equal(before[1].element, after[1].element);
+  assert.equal(fixture.adapter.replyAnchors()[0].parent, bar);
+  const result = await fixture.adapter.readMessages(before.map(entry => entry.element));
+  assert.match(result.text, /You:\nQuestion 1\?/);
+  assert.match(result.text, /Claude:\nAnswer 1 here\./);
+});
 
 for (const [provider, { turn = replyLayouts[provider], prompt, reply }] of Object.entries(writing)) {
   test(`${provider}: an earlier reply can be shared while the chat writes a newer one`, (t) => {

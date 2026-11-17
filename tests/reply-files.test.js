@@ -1,275 +1,126 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
+import { readFile } from 'node:fs/promises';
 import { JSDOM } from 'jsdom';
 
-const source = name => readFileSync(new URL(`../extension/${name}.js`, import.meta.url), 'utf8');
-const scripts = ['download-capture', 'reply-files', 'adapters'].map(source);
-function setup(t, body, host = 'chatgpt.com') {
-  const dom = new JSDOM(body, { url: `https://${host}/c/test`, runScripts: 'outside-only' });
-  t.after(() => dom.window.close());
-  const w = dom.window;
-  w.HTMLElement.prototype.getClientRects = () => [{ width: 100, height: 40 }];
-  w.Blob = Blob;
-  let serial = 0;
-  w.URL.createObjectURL = () => `blob:https://${host}/${++serial}`;
-  w.URL.revokeObjectURL = () => {};
-  w.fetch = () => { throw new Error('Unexpected network request'); };
-  for (const script of scripts) w.eval(script);
-  const download = (name, contents, type = 'application/vnd.openxmlformats-officedocument.wordprocessingml.document') => {
-    const a = w.document.createElement('a');
-    a.download = name;
-    a.href = w.URL.createObjectURL(new w.Blob([contents], { type }));
-    a.click();
-    w.URL.revokeObjectURL(a.href);
-  };
-  return { w, document: w.document, files: w.AISplitReplyFiles, adapter: w.AISplitAdapters, download };
+const replySource = await readFile(new URL('../extension/reply-files.js', import.meta.url), 'utf8');
+const captureSource = await readFile(new URL('../extension/download-capture.js', import.meta.url), 'utf8');
+
+function setup(body, { capture = false } = {}) {
+  const dom = new JSDOM(`<!doctype html><main data-message-id="reply-1">${body}</main>`, {
+    url: 'https://claude.ai/chat/test', runScripts: 'outside-only', pretendToBeVisual: true,
+  });
+  const { window } = dom;
+  const document = window.document;
+  const scope = document.querySelector('main');
+  const read = blob => new Promise(resolve => {
+    const reader = new window.FileReader();
+    reader.onload = () => resolve(reader.result);
+    reader.readAsArrayBuffer(blob);
+  });
+  window.Blob.prototype.arrayBuffer ??= function () { return read(this); };
+  let urls = 0, nativeClicks = 0;
+  window.URL.createObjectURL = () => `blob:https://claude.ai/test-${++urls}`;
+  window.URL.revokeObjectURL = () => {};
+  window.HTMLAnchorElement.prototype.click = () => { nativeClicks++; };
+  const originalClick = window.HTMLAnchorElement.prototype.click;
+  const originalURL = window.URL.createObjectURL;
+  if (capture) window.eval(captureSource);
+  window.eval(replySource);
+  return { dom, window, document, scope, api: window.AISplitReplyFiles, originalClick, originalURL, nativeClicks: () => nativeClicks };
 }
-const card = name => `<span><button aria-label="Open preview of ${name}"></button><span>${name}</span><button aria-label="Download file"></button></span>`;
-const nativeCard = (title, format, kind = 'doc') => `<div data-testid="file-card-block" data-sheet-kind="${kind}"><button data-testid="file-card-open" aria-label="View ${title}"></button><span>${title}</span><span>${format}</span><button aria-label="Download ${title}">Download</button></div>`;
 
-test('Claude native cards preserve different generated formats and their real download names', async t => {
-  const types = [
-    ['Data table', 'CSV', 'sheet', 'data-table.csv', 'text/csv', 'marker,value\nCSV-TOKEN,1'],
-    ['Json data', 'JSON', 'doc', 'json_data.json', 'application/json', '{"marker":"JSON-TOKEN"}'],
-    ['Gpt oss slot probe', 'IPYNB', 'doc', 'gpt_oss_slot_probe.ipynb', 'application/json', '{"cells":[{"source":"NOTEBOOK-TOKEN"}]}'],
-    ['Gpu probe', 'ZIP', 'archive', 'gpu-probe.zip', 'application/zip', new Uint8Array([80, 75, 3, 4, 0, 255])],
-    ['Picture', 'PNG', 'image', 'picture.png', 'image/png', new Uint8Array([137, 80, 78, 71, 0, 255])],
-    ['Deck', 'PPTX', 'slides', 'deck.pptx', 'application/vnd.openxmlformats-officedocument.presentationml.presentation', new Uint8Array([80, 75, 3, 4])],
-    ['Report', 'PDF', 'doc', 'report.pdf', 'application/pdf', '%PDF-1.7\nsynthetic'],
-    ['Source', 'PY', 'code', 'source.py', 'text/x-python', 'print("SOURCE-TOKEN")'],
-    ['Workbook', 'XLSX', 'sheet', 'workbook.xlsx', 'application/octet-stream', new Uint8Array([80, 75, 3, 4, 1, 2])],
-    ['Data segment', 'PARQUET', 'file', 'data_segment.parquet', 'application/octet-stream', new Uint8Array([80, 65, 82, 49, 255])],
-  ];
-  const f = setup(t, `<div data-testid="assistant-message">${types.map(([title, format, kind]) => nativeCard(title, format, kind)).join('')}<button>Download all</button></div>`, 'claude.ai');
-  for (const [title, , , filename, mime, bytes] of types) {
-    f.document.querySelector(`button[aria-label="Download ${title}"]`).onclick = () => f.download(filename, bytes, mime);
-  }
-  const reply = f.adapter.getResponse();
-  assert.equal(reply.files.length, types.length, 'Download all is not copied as another file');
-  const copies = await f.files.read(reply.files);
-  assert.deepEqual(Array.from(copies, file => file.name), types.map(type => type[3]));
-  for (let i = 0; i < copies.length; i++) assert.deepEqual(Buffer.from(copies[i].data, 'base64'), Buffer.from(types[i][5]));
+const card = (title, format = 'MD', extra = '') => `<div data-testid="file-card-block" ${extra}>
+  <button data-testid="file-card-open" aria-label="View ${title}"></button>
+  <span>${format}</span><button title="Download ${title}" class="download">↓</button>
+</div>`;
+
+test('all Markdown file cards are listed, including distinct cards with the same title', t => {
+  const f = setup(card('notes') + card('notes') + card('rubric.md'));
+  t.after(() => f.dom.window.close());
+  const files = f.api.list(f.scope);
+  assert.deepEqual(Array.from(files, f => f.name), ['notes.md', 'notes.md', 'rubric.md']);
+  assert.equal(new Set(files.map(f => f.key)).size, 3);
+  assert.ok(files.every(f => f.kind === 'download'));
 });
 
-test('Content-Disposition names and generic MIME types are retained correctly', async t => {
-  const f = setup(t, '<a download href="https://chatgpt.com/file">Spreadsheet</a>');
-  f.w.fetch = async () => new Response(new Uint8Array([80, 75, 3, 4]), { headers: {
-    'Content-Type': 'application/octet-stream', 'Content-Disposition': "attachment; filename*=UTF-8''results%20%E6%B5%8B%E8%AF%95.xlsx",
-  } });
-  const [copy] = await f.files.read(f.files.list(f.document.body));
-  assert.equal(copy.name, 'results 测试.xlsx');
-  assert.equal(copy.type, 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+test('hidden file cards and ordinary Markdown citations are not included', t => {
+  const f = setup(`<div style="display:none">${card('hidden')}</div>${card('visible')}<a href="https://example.org/readme.md">Readme citation</a>`);
+  t.after(() => f.dom.window.close());
+  assert.deepEqual(Array.from(f.api.list(f.scope), f => f.name), ['visible.md']);
 });
 
-test('files with the same display title but different formats remain separate', t => {
-  const f = setup(t, `<div data-testid="assistant-message">${nativeCard('Bridge data', 'Table<span>·</span>CSV', 'csv')}${nativeCard('Bridge data', 'Code<span>·</span>JSON', 'json')}</div>`, 'claude.ai');
-  assert.deepEqual(Array.from(f.adapter.getResponse().files, file => file.name), ['Bridge data.csv', 'Bridge data.json']);
+test('a card with a native download link is not listed twice', t => {
+  const f = setup('<div data-testid="file-card-block"><button data-testid="file-card-open" aria-label="View notes"></button><span>MD</span><a download="notes.md" href="blob:https://claude.ai/notes">Download</a></div>');
+  t.after(() => f.dom.window.close());
+  assert.equal(f.api.list(f.scope).length, 1);
 });
 
-test('ChatGPT sibling file cards share actual bytes, not just their labels; duplicate links and citations stay scoped', async t => {
-  const f = setup(t, `<div data-chatgpt-selection-message-id="one"><div data-markdown-text-style="assistant-message"><p>Here is the report.</p><a href="https://example.com/source.pdf">Source</a></div>${card('report.docx')}</div>
-    <div data-chatgpt-selection-message-id="two">${card('other.docx')}</div>`);
-  let reads = 0;
-  f.document.querySelector('button[aria-label="Download file"]').onclick = () => { reads++; f.download('report.docx', new Uint8Array([0, 255, 1, 2, 128])); };
-  const reply = f.adapter.replyText(f.document.querySelector('[data-markdown-text-style]'));
-  assert.deepEqual(Array.from(reply.files, x => x.name), ['report.docx']);
-  assert.equal(reads, 0, 'opening Share only discovers the files');
-  const click = f.w.HTMLAnchorElement.prototype.click;
-  const createURL = f.w.URL.createObjectURL;
-  const copies = await f.adapter.readReplyFiles(reply.files);
-  assert.equal(reads, 1);
-  assert.equal(copies[0].name, 'report.docx');
-  assert.deepEqual([...Buffer.from(copies[0].data, 'base64')], [0, 255, 1, 2, 128]);
-  assert.equal(f.w.HTMLAnchorElement.prototype.click, click, 'native download behavior is restored');
-  assert.equal(f.w.URL.createObjectURL, createURL);
-  assert.equal(f.document.querySelector('[data-asb-file-capture]'), null);
+test('several Markdown downloads are captured separately, keep UTF-8 bytes, and restore browser hooks', async t => {
+  const f = setup(card('notes') + card('rubric'), { capture: true });
+  t.after(() => f.dom.window.close());
+  const bodies = ['# Notes\n\nRésumé — café\n', '# Rubric\n\n| A | B |\n|---|---|\n|1|2|\n'];
+  f.scope.querySelectorAll('.download').forEach((button, i) => button.onclick = () => {
+    const url = f.window.URL.createObjectURL(new f.window.Blob([bodies[i]], { type: 'application/octet-stream' }));
+    const link = f.document.createElement('a');
+    link.href = url; link.download = ['notes.md', 'rubric.md'][i];
+    link.click(); link.click();
+    f.window.URL.revokeObjectURL(url);
+  });
+  const files = await f.api.read(f.api.list(f.scope));
+  assert.deepEqual(Array.from(files, f => [f.name, f.type, Buffer.from(f.data, 'base64').toString('utf8')]),
+    [['notes.md', 'text/markdown', bodies[0]], ['rubric.md', 'text/markdown', bodies[1]]]);
+  assert.equal(f.nativeClicks(), 0, 'file downloads are captured, not also saved by the browser');
+  assert.equal(f.window.HTMLAnchorElement.prototype.click, f.originalClick);
+  assert.equal(f.window.URL.createObjectURL, f.originalURL);
+  assert.equal(f.document.querySelectorAll('[data-asb-file-capture]').length, 0);
 });
 
-test('explicit download links deduplicate by URL; sandbox downloads use the site handler', async t => {
-  const f = setup(t, `<div data-message-author-role="assistant"><div class="markdown"><a href="sandbox:/mnt/data/report.pdf">Report</a><a href="sandbox:/mnt/data/report.pdf">Again</a><a href="https://example.com/source.pdf">Citation</a></div></div>`);
-  const a = f.document.querySelector('a');
-  a.onclick = event => { event.preventDefault(); f.download('report.pdf', '%PDF synthetic', 'application/pdf'); };
-  const reply = f.adapter.getResponse();
-  assert.equal(reply.files.length, 1);
-  assert.equal(Buffer.from((await f.files.read(reply.files))[0].data, 'base64').toString(), '%PDF synthetic');
+test('equal-title files still refer to the selected controls after their cards are reordered', async t => {
+  const f = setup(card('notes') + card('notes'), { capture: true });
+  t.after(() => f.dom.window.close());
+  const originals = [...f.scope.querySelectorAll('.download')];
+  originals.forEach((button, i) => button.onclick = () => {
+    const link = f.document.createElement('a');
+    link.href = f.window.URL.createObjectURL(new f.window.Blob([`revision ${i + 1}`]));
+    link.download = 'notes.md';link.click();
+  });
+  const selected = f.api.list(f.scope);
+  f.scope.prepend(f.scope.lastElementChild);
+  const copied = await f.api.read(selected);
+  assert.deepEqual(Array.from(copied, f => Buffer.from(f.data, 'base64').toString()), ['revision 1', 'revision 2']);
 });
 
-test('selected text excludes documents, while an otherwise empty reply can share its file', t => {
-  const f = setup(t, `<div data-message-author-role="assistant"><div class="markdown"><p>A selected sentence.</p></div>${card('report.docx')}</div>`);
-  const markdown = f.document.querySelector('.markdown');
-  const range = f.document.createRange();
-  range.selectNodeContents(markdown.querySelector('p'));
-  f.w.getSelection().addRange(range);
-  const selected = f.adapter.getResponse();
-  assert.equal(selected.partial, true);
-  assert.equal(selected.files, undefined);
-  f.w.getSelection().removeAllRanges();
-  markdown.replaceChildren();
-  const reply = f.adapter.getResponse();
-  assert.equal(reply.text, '');
-  assert.equal(reply.files[0].name, 'report.docx');
+test('a replaced ambiguous equal-title card fails instead of switching to another file', async t => {
+  const f = setup(card('notes') + card('notes'));
+  t.after(() => f.dom.window.close());
+  const selected = f.api.list(f.scope);
+  f.scope.innerHTML = card('notes') + card('notes');
+  await assert.rejects(f.api.read(selected), /file is no longer in this reply/);
 });
 
-test('Claude Docs opens its export dialog, exports Word and closes only that dialog', async t => {
-  const f = setup(t, `<div data-testid="assistant-message"><p>Updated the document.</p><div data-sheet-kind="doc"><button data-testid="frame-card-open" aria-label="View Course plan"></button><button data-testid="frame-card-share" aria-label="Share Course plan"></button></div><div data-sheet-kind="doc">A cited source with no export control</div></div>`, 'claude.ai');
-  let exports = 0, closed = 0;
-  f.document.querySelector('[data-testid="frame-card-share"]').onclick = () => {
-    const dialog = f.document.createElement('div');
-    dialog.setAttribute('role', 'dialog');
-    dialog.setAttribute('aria-label', 'Course plan');
-    dialog.innerHTML = '<button role="radio">Export</button><button aria-label="Close">Close</button>';
-    dialog.querySelector('[role="radio"]').onclick = () => {
-      const word = f.document.createElement('button');
-      word.textContent = 'Word , Editable .docx document';
-      word.onclick = () => { exports++; f.download('Course plan.docx', 'the complete course plan'); };
-      dialog.append(word);
-    };
-    dialog.querySelector('[aria-label="Close"]').onclick = () => { closed++; dialog.remove(); };
-    f.document.body.append(dialog);
+test('a changed conversation is rejected while reading a generated file', async t => {
+  const f = setup(card('notes'));
+  t.after(() => f.dom.window.close());
+  f.document.addEventListener('asb-file-request', e => {
+    const { id } = JSON.parse(e.detail);
+    f.window.history.pushState({}, '', '/chat/another');
+    f.document.dispatchEvent(new f.window.CustomEvent('asb-file-result', {
+      detail: JSON.stringify({ id, file: { name: 'notes.md', data: btoa('# Notes') } }),
+    }));
+  });
+  await assert.rejects(f.api.read(f.api.list(f.scope)), /reply changed while its file was being read/);
+});
+
+test('unrelated downloads pass through while a marked Markdown download is captured', async t => {
+  const f = setup(card('notes'), { capture: true });
+  t.after(() => f.dom.window.close());
+  f.scope.querySelector('.download').onclick = () => {
+    const other = f.document.createElement('a');other.href = 'https://example.org/report.pdf';other.download = 'report.pdf';other.click();
+    const link = f.document.createElement('a');link.download = 'notes.md';
+    link.href = f.window.URL.createObjectURL(new f.window.Blob(['# Chosen']));link.click();
   };
-  const reply = f.adapter.getResponse();
-  assert.equal(reply.files.length, 1);
-  assert.equal(exports, 0);
-  const copies = await f.files.read(reply.files);
-  assert.equal(exports, 1);
-  assert.equal(closed, 1);
-  assert.equal(copies[0].name, 'Course plan.docx');
-  assert.equal(Buffer.from(copies[0].data, 'base64').toString(), 'the complete course plan');
-});
-
-test('unreadable and oversized files fail before sharing and restore the native downloader', async t => {
-  for (const fail of ['expired', 'oversized']) {
-    const f = setup(t, `<div>${card('report.docx')}</div>`);
-    const click = f.w.HTMLAnchorElement.prototype.click;
-    f.document.querySelector('[aria-label="Download file"]').onclick = () => {
-      if (fail === 'expired') {
-        const a = f.document.createElement('a');
-        a.download = 'report.docx'; a.href = 'https://chatgpt.com/expired';
-        f.w.fetch = async () => new Response('Expired', { status: 403 });
-        a.click();
-      } else f.download('report.docx', new Uint8Array(20 * 1024 * 1024 + 1));
-    };
-    await assert.rejects(f.files.read(f.files.list(f.document.body)), /Nothing was sent.*(expired|exceeds 20 MB).*attach this file manually/);
-    assert.equal(f.w.HTMLAnchorElement.prototype.click, click);
-  }
-});
-
-test('Claude Docs exports through its same-origin artifact frame and releases both download hooks', async t => {
-  const f = setup(t, `<div data-testid="assistant-message"><div data-sheet-kind="doc"><button data-testid="frame-card-open" aria-label="View Plan"></button><button data-testid="frame-card-share" aria-label="Share Plan"></button></div></div><iframe src="/code/artifact/fixture-doc"></iframe>`, 'claude.ai');
-  const frame = f.document.querySelector('iframe');
-  const frameDocument = frame.contentDocument, view = frame.contentWindow;
-  frameDocument.open(); frameDocument.write('<html><body></body></html>'); frameDocument.close();
-  view.Blob = Blob;
-  view.URL.createObjectURL = () => 'blob:https://claude.ai/frame-file';
-  view.URL.revokeObjectURL = () => {};
-  const topClick = f.w.HTMLAnchorElement.prototype.click, frameClick = view.HTMLAnchorElement.prototype.click;
-  f.document.querySelector('[data-testid="frame-card-share"]').onclick = () => {
-    // Opening an artifact can change the preview query without changing conversations.
-    f.w.history.replaceState({}, '', '/c/test?artifact=fixture-doc');
-    frameDocument.body.innerHTML = '<div role="dialog"><h2>Plan</h2><span role="radio">Export</span><button>Word, Editable .docx document</button><button aria-label="Close"></button></div>';
-    frameDocument.querySelector('button').onclick = () => {
-      const a = frameDocument.createElement('a');
-      a.download = 'Plan.docx';
-      a.href = view.URL.createObjectURL(new view.Blob(['frame document bytes']));
-      a.click(); view.URL.revokeObjectURL(a.href);
-    };
-    frameDocument.querySelector('[aria-label="Close"]').onclick = () => frameDocument.body.replaceChildren();
-  };
-  const copies = await f.files.read(f.adapter.getResponse().files);
-  assert.equal(Buffer.from(copies[0].data, 'base64').toString(), 'frame document bytes');
-  assert.equal(frameDocument.querySelector('[role="dialog"]'), null);
-  assert.equal(f.w.HTMLAnchorElement.prototype.click, topClick);
-  assert.equal(view.HTMLAnchorElement.prototype.click, frameClick);
-});
-
-test('a native download timeout restores normal page behavior and leaves no capture marker', async t => {
-  const f = setup(t, card('report.docx'));
-  const schedule = f.w.setTimeout;
-  f.w.setTimeout = (fn, ms) => schedule(fn, ms === 30_000 ? 0 : ms);
-  const click = f.w.HTMLAnchorElement.prototype.click;
-  const createURL = f.w.URL.createObjectURL;
-  await assert.rejects(f.files.read(f.files.list(f.document.body)), /readable download in time/);
-  assert.equal(f.w.HTMLAnchorElement.prototype.click, click);
-  assert.equal(f.w.URL.createObjectURL, createURL);
-  assert.equal(f.document.querySelector('[data-asb-file-capture]'), null);
-});
-
-test('an unrelated simultaneous blob download is left alone and cannot replace the chosen file', async t => {
-  const f = setup(t, card('report.docx'));
-  let unrelated = 0;
-  f.document.querySelector('[aria-label="Download file"]').onclick = () => {
-    const other = f.document.createElement('a');
-    other.download = 'unrelated.docx';
-    other.href = f.w.URL.createObjectURL(new f.w.Blob(['wrong file']));
-    other.addEventListener('click', event => { unrelated++; event.preventDefault(); });
-    other.click();
-    f.download('report.docx', 'chosen file');
-  };
-  const copies = await f.files.read(f.files.list(f.document.body));
-  assert.equal(unrelated, 1);
-  assert.equal(Buffer.from(copies[0].data, 'base64').toString(), 'chosen file');
-});
-
-test('direct downloads reject login HTML and stop at the byte limit even with no Content-Length', async t => {
-  const f = setup(t, '<a download="report.docx" href="https://chatgpt.com/report">Download</a>');
-  f.w.fetch = async () => new Response('<html>Sign in</html>', { headers: { 'Content-Type': 'text/html' } });
-  await assert.rejects(f.files.read(f.files.list(f.document.body)), /page instead of the file/);
-  f.w.fetch = async () => new Response(new ReadableStream({ start(controller) { controller.enqueue(new Uint8Array(20 * 1024 * 1024 + 1)); controller.close(); } }));
-  await assert.rejects(f.files.read(f.files.list(f.document.body)), /exceeds 20 MB/);
-});
-
-test('navigation or a removed reply invalidates the file selection; existing dialogs stay untouched', async t => {
-  const f = setup(t, `<div data-sheet-kind="doc"><button data-testid="frame-card-open" aria-label="View Plan"></button><button data-testid="frame-card-share" aria-label="Share Plan"></button></div>`, 'claude.ai');
-  const files = f.files.list(f.document.body);
-  const dialog = f.document.createElement('div'); dialog.setAttribute('role', 'dialog');
-  f.document.body.append(dialog);
-  await assert.rejects(f.files.read(files), /Close the open dialog/);
-  assert.equal(dialog.isConnected, true);
-  files[0].element.remove();
-  await assert.rejects(f.files.read(files), /reply changed|no longer in this reply/);
-});
-
-test('a recognized file card without a downloader is reported instead of silently sharing text', async t => {
-  const f = setup(t, '<div data-message-author-role="assistant"><div class="markdown">The file is ready.</div><span class="group/resource-row"><button aria-label="Open preview of unavailable.docx"></button></span></div>');
-  const reply = f.adapter.getResponse();
-  assert.equal(reply.files.length, 1);
-  await assert.rejects(f.files.read(reply.files), /no download control/);
-});
-
-test('inline references to uploaded files are not mistaken for generated downloads', t => {
-  const f = setup(t, '<div data-message-author-role="assistant"><div class="markdown"><table><tr><td><button aria-label="Open preview of uploaded.csv">uploaded.csv</button></td><td>A verified result.</td></tr></table></div></div>');
-  assert.equal(f.adapter.getResponse().files, undefined);
-});
-
-test('sharing expands ChatGPT resource lists before discovering every generated file', async t => {
-  const f = setup(t, `<div data-message-author-role="assistant"><div class="markdown">Five generated files.</div><div id="resources">${card('report.docx')}${card('sheet.xlsx')}${card('slides.pptx')}<span hidden id="extra">${card('report.pdf')}${card('image.png')}</span><button aria-controls="extra" aria-expanded="false">2 more</button></div></div>`);
-  const expand = f.document.querySelector('[aria-expanded]');
-  let clicks = 0;
-  expand.onclick = () => { clicks++; expand.setAttribute('aria-expanded', 'true'); f.document.querySelector('#extra').hidden = false; };
-  const reply = await f.adapter.readResponse();
-  assert.equal(clicks, 1);
-  assert.deepEqual(Array.from(reply.files, file => file.name), ['report.docx', 'sheet.xlsx', 'slides.pptx', 'report.pdf', 'image.png']);
-});
-
-test('a native download may rerender the file controls without changing the logical reply', async t => {
-  const f = setup(t, `<div data-chatgpt-selection-message-id="stable"><div data-markdown-text-style="assistant-message">Two files.</div>${card('report.docx')}${card('sheet.xlsx')}</div>`);
-  let downloads = 0;
-  function wire() {
-    const buttons = f.document.querySelectorAll('[aria-label="Download file"]');
-    buttons.forEach((button, index) => { button.onclick = () => {
-      const names = ['report.docx', 'sheet.xlsx'];
-      downloads++;
-      f.download(names[index], `file ${index}`);
-      // Current ChatGPT redraws its resource rows after requesting a download.
-      const scope = f.document.querySelector('[data-chatgpt-selection-message-id]');
-      scope.outerHTML = `<div data-chatgpt-selection-message-id="stable"><div data-markdown-text-style="assistant-message">Two files.</div>${card('report.docx')}${card('sheet.xlsx')}</div>`;
-      wire();
-    }; });
-  }
-  wire();
-  const reply = await f.adapter.readResponse();
-  const copies = await f.files.read(reply.files);
-  assert.equal(downloads, 2);
-  assert.deepEqual(Array.from(copies, file => Buffer.from(file.data, 'base64').toString()), ['file 0', 'file 1']);
+  const [file] = await f.api.read(f.api.list(f.scope));
+  assert.equal(Buffer.from(file.data, 'base64').toString(), '# Chosen');
+  assert.equal(f.nativeClicks(), 1);
 });

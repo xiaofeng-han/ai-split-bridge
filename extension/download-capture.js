@@ -18,7 +18,11 @@
       } catch { /* inaccessible frame */ }
     }
     const control = roots.map(root => root.querySelector(`[data-asb-file-capture="${id}"]`)).find(Boolean);
-    if (!control || !control.matches('a[href], button')) return;
+    // Claude's artifact export menu uses custom menuitems; compact controls may
+    // likewise be spans with button semantics. Only the explicitly marked
+    // interactive element may start a download, never its surrounding card.
+    if (!control || !control.matches('a[href], button, [role="button"], [role="menuitem"]')
+      || typeof control.click !== 'function') return;
     active = true;
     const realms = [...new Set([window, control.ownerDocument.defaultView])].map(view => ({
       view, click: view.HTMLAnchorElement.prototype.click, createURL: view.URL.createObjectURL,
@@ -58,7 +62,7 @@
       pdf: 'application/pdf', docx: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
       xlsx: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
       pptx: 'application/vnd.openxmlformats-officedocument.presentationml.presentation',
-      csv: 'text/csv', tsv: 'text/tab-separated-values', txt: 'text/plain', md: 'text/markdown',
+      csv: 'text/csv', tsv: 'text/tab-separated-values', txt: 'text/plain', md: 'text/markdown', markdown: 'text/markdown',
       json: 'application/json', jsonl: 'application/x-ndjson', ipynb: 'application/x-ipynb+json',
       zip: 'application/zip', png: 'image/png', jpg: 'image/jpeg', jpeg: 'image/jpeg',
       gif: 'image/gif', webp: 'image/webp', svg: 'image/svg+xml', html: 'text/html',

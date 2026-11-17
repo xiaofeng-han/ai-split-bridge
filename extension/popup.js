@@ -1,4 +1,4 @@
-import { DEFAULT_SHARE_MESSAGE, loadSettings, saveSettings } from './settings.js';
+import { DEFAULT_SHARE_MESSAGE, DEFAULT_PROMPT_MESSAGE, DEFAULT_CONVERSATION_MESSAGE, loadSettings, saveSettings } from './settings.js';
 
 const $ = selector => document.querySelector(selector);
 const status = $('#status');
@@ -59,56 +59,85 @@ refresh().catch(error => report(error.message, true));
 // ---------- Share settings ----------
 const message = $('#share-message');
 const sendNow = $('#send-now');
+const kind = $('#share-kind');
+const templates = {
+  reply: { key: 'shareMessage', default: DEFAULT_SHARE_MESSAGE, label: 'Message with the shared reply', placeholder: '{reply}' },
+  prompt: { key: 'promptMessage', default: DEFAULT_PROMPT_MESSAGE, label: 'Message with your prompt', placeholder: '{content}' },
+  conversation: { key: 'conversationMessage', default: DEFAULT_CONVERSATION_MESSAGE, label: 'Message with selected messages', placeholder: '{content}' },
+};
+const current = () => templates[kind.value];
 const count = () => { $('#count').textContent = `${message.value.length.toLocaleString()} / ${message.maxLength.toLocaleString()}`; };
 const describeMode = () => {
-  $('#mode-detail').textContent = sendNow.checked ? 'The reply is sent to the chat you pick.' : 'The reply is added as a draft for you to review first.';
+  $('#mode-detail').textContent = sendNow.checked ? 'Shared messages are sent to the chat you pick.' : 'Shared messages are added as drafts for you to review first.';
 };
-let saveTimer = null;
-async function save(changes) {
+let settings, saveTimer = null, revision = 0, saveQueue = Promise.resolve();
+function showMessage() {
+  const template = current();
+  message.value = settings[template.key]?.trim() ? settings[template.key] : template.default;
+  $('#message-label').textContent = template.label;
+  $('#content-placeholder').textContent = $('#content-placeholder').dataset.insert = template.placeholder;
+  count();
+}
+function save() {
   clearTimeout(saveTimer);
   saveTimer = null;
-  try {
-    await saveSettings(chrome.storage.sync, changes);
-    $('#saved').textContent = 'Saved';
-  } catch (error) {
-    $('#saved').textContent = `Not saved: ${error.message}`;
-  }
+  if (!settings) return;
+  // Include every local edit, and finish writes in order. Switching templates or
+  // changing Send right away must not cancel a message still waiting to save.
+  const changes = { ...settings }, savedRevision = revision;
+  saveQueue = saveQueue.then(async () => {
+    try {
+      await saveSettings(chrome.storage.sync, changes);
+      if (savedRevision === revision) $('#saved').textContent = 'Saved';
+    } catch (error) {
+      if (savedRevision === revision) $('#saved').textContent = `Not saved: ${error.message}`;
+    }
+  });
+  return saveQueue;
 }
-loadSettings(chrome.storage.sync).then(settings => {
+loadSettings(chrome.storage.sync).then(stored => {
+  settings = stored;
   sendNow.checked = settings.shareMode === 'send';
-  message.value = settings.shareMessage;
+  $('#share-settings').querySelectorAll('input, select, textarea, button').forEach(control => { control.disabled = false; });
   describeMode();
-  count();
+  showMessage();
 }, error => { $('#saved').textContent = `Could not load settings: ${error.message}`; });
 sendNow.addEventListener('change', () => {
   describeMode();
-  save({ shareMode: sendNow.checked ? 'send' : 'draft' });
+  settings.shareMode = sendNow.checked ? 'send' : 'draft';
+  revision++;
+  save();
 });
 message.addEventListener('input', () => {
+  settings[current().key] = message.value;
+  revision++;
   $('#saved').textContent = '';
   count();
   clearTimeout(saveTimer);
-  saveTimer = setTimeout(() => save({ shareMessage: message.value }), 400);
+  saveTimer = setTimeout(save, 400);
 });
 document.querySelectorAll('[data-insert]').forEach(button => button.addEventListener('click', () => {
   message.focus();
+  if (message.value.length - (message.selectionEnd - message.selectionStart) + button.dataset.insert.length > message.maxLength) return;
   message.setRangeText(button.dataset.insert, message.selectionStart, message.selectionEnd, 'end');
   message.dispatchEvent(new Event('input'));
 }));
 // The popup can close at any moment, so typing is saved as soon as focus leaves or the popup hides.
-const flush = () => { if (saveTimer !== null) save({ shareMessage: message.value }); };
+const flush = () => { if (saveTimer !== null) save(); };
+kind.addEventListener('change', () => { flush(); showMessage(); });
 message.addEventListener('blur', () => {
   flush();
   // An emptied message is stored as the default, so show what will actually be sent.
   if (!message.value.trim()) {
-    message.value = DEFAULT_SHARE_MESSAGE;
+    settings[current().key] = message.value = current().default;
     count();
   }
 });
 addEventListener('pagehide', flush);
 $('#reset-message').addEventListener('click', () => {
-  message.value = DEFAULT_SHARE_MESSAGE;
+  settings[current().key] = message.value = current().default;
+  revision++;
   count();
-  save({ shareMessage: DEFAULT_SHARE_MESSAGE });
+  save();
 });
 $('#share-settings').addEventListener('submit', event => event.preventDefault());

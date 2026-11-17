@@ -10,12 +10,12 @@
     chatgpt: {
       name: "ChatGPT",
       hosts: ["chatgpt.com", "chat.openai.com"],
-      editors: ["#prompt-textarea[contenteditable='true']", "textarea#prompt-textarea", "[contenteditable='true'][aria-label='Ask ChatGPT']", "textarea[name='prompt']"],
+      editors: ["#prompt-textarea[contenteditable='true']", "textarea#prompt-textarea", "[contenteditable='true'][aria-label='Ask ChatGPT']", "textarea[name='prompt']", "[contenteditable='true'][data-composer-markdown]", "[contenteditable='true'][aria-label^='New chat in ' i]", "textarea[placeholder^='New chat in ' i]", "[contenteditable='true'][data-placeholder^='New chat in ' i]"],
       send: ["button[data-testid='send-button']", "button[aria-label='Send prompt']", "button[aria-label='Send message']", "button[data-composer-submit]:not([aria-label^='Stop'])", "button[aria-label='Send']"],
       stop: ["button[data-testid='stop-button']", "button[aria-label='Stop generating']", "button[aria-label='Stop streaming']", "button[aria-label='Stop']"],
       voice: ["button[data-testid='composer-speech-button']", "button[aria-label^='Start voice' i]", "button[aria-label^='Start dictation' i]", "button[aria-label^='Dictate' i]", "button[data-start-dictation]"],
       responses: ["[data-markdown-text-style='assistant-message']", "[data-message-role='assistant'] [data-assistant-markdown-root]", "[data-message-author-role='assistant'] .markdown", "[data-message-author-role='assistant']"],
-      prompts: ["[data-message-author-role='user']", "[data-content-search-unit-key$=':user']"],
+      prompts: ["[data-message-author-role='user']", "[data-message-role='user']", "[data-content-search-unit-key$=':user']"],
       ignore: ["[data-d-component='badge']"],
     },
     claude: {
@@ -47,6 +47,7 @@
       stop: ["button[aria-label='Stop response']", "button[aria-label='Stop generating']", "button[aria-label='Stop']", "button[data-testid='stop-button']"],
       voice: ["button[aria-label^='Enter voice mode' i]", "button[aria-label^='Voice mode' i]", "button[aria-label^='Dictation' i]"],
       responses: ["[data-testid='assistant-message']", "[data-message-author-role='assistant']", ".message-bubble .response-content-markdown"],
+      prompts: ["[data-testid='user-message']", "[data-message-author-role='user']", "[data-message-role='user']"],
     },
   };
   const copySelectors = [
@@ -118,11 +119,19 @@
     return normalize(text);
   }
 
-  function visible(element) {
+  function shown(element, allowTransparent) {
     if (!element?.isConnected || element.hidden || element.closest("[hidden], [inert]")) return false;
-    const style = getComputedStyle(element);
-    return style.display !== "none" && style.visibility !== "hidden" && element.getClientRects().length > 0;
+    for (let node = element; node; node = node.parentElement) {
+      const style = getComputedStyle(node);
+      if (style.display === "none" || style.visibility === "hidden" || style.visibility === "collapse"
+        || (!allowTransparent && style.opacity === "0") || style.contentVisibility === "hidden") return false;
+    }
+    return element.getClientRects().length > 0;
   }
+  const visible = element => shown(element, false);
+  // Reply toolbars often fade out until hovered. Keep their message boundaries
+  // and injected actions stable; the site's own hover styling reveals them.
+  const laidOut = element => shown(element, true);
 
   function firstMatch(selectors, root = document) {
     for (const selector of selectors) {
@@ -635,12 +644,59 @@
     return normalize(serialize(clone).replace(/\n{3,}/g, "\n\n"));
   }
 
-  function responseElements() {
-    for (const selector of config.responses) {
+  function rawResponses() {
+    // Claude mixes labelled blocks with unlabelled Markdown siblings in one reply.
+    const selectors = provider === "claude" ? [config.responses.join(", ")] : config.responses;
+    for (const selector of selectors) {
       const found = [...document.querySelectorAll(selector)].filter(visible);
-      if (found.length) return found;
+      if (found.length) return found.filter(node => !found.some(other => other !== node && other.contains(node)));
     }
     return [];
+  }
+
+  function promptElements() {
+    const found = [...document.querySelectorAll(config.prompts.join(", "))].filter(visible);
+    // Grok also renders user bubbles without a role attribute. An Edit action identifies
+    // those bubbles, while an assistant markdown block or another turn stops the search.
+    if (provider === "grok") {
+      for (const button of document.querySelectorAll("button")) {
+        if (!/^edit(?: message| prompt)?$/i.test(actionLabel(button))) continue;
+        for (let node = button.parentElement, depth = 0; node && depth < 4; node = node.parentElement, depth++) {
+          if (node.querySelector(config.responses.join(", ")) || node.querySelector("[contenteditable='true'], textarea")) break;
+          const bubbles = [...node.querySelectorAll(".message-bubble")].filter(visible);
+          if (bubbles.length > 1) break;
+          if (bubbles.length === 1) { found.push(bubbles[0]); break; }
+        }
+      }
+    }
+    return [...new Set(found)].filter(node => !found.some(other => other !== node && other.contains(node)));
+  }
+
+  // Claude can render several Markdown blocks and file cards before one action bar.
+  // Stop at a user turn, composer, or a second action bar so neighbouring replies never merge.
+  function replyScope(element, raw = rawResponses(), bars = actionBars(raw)) {
+    const semantic = element.closest("[data-chatgpt-selection-message-id], [data-message-author-role='assistant'], [data-message-role='assistant'], [data-testid='assistant-message'], model-response");
+    if (provider !== "claude") return semantic || element;
+    let grouped = semantic || element;
+    for (let node = element, depth = 0; node && node !== document.body && node.tagName !== "MAIN" && depth < 8; node = node.parentElement, depth++) {
+      if (node.querySelector(config.prompts.join(", ")) || node.querySelector("[contenteditable='true'], textarea")) break;
+      const ownBars = bars.filter(bar => node.contains(bar));
+      if (ownBars.length > 1) break;
+      if (ownBars.length === 1) return node;
+      if (raw.filter(response => node.contains(response)).length > 1) grouped = node;
+    }
+    return grouped;
+  }
+
+  function responseElements(raw = rawResponses()) {
+    const bars = provider === "claude" ? actionBars(raw) : [];
+    return [...new Set(raw.map(element => replyScope(element, raw, bars)))];
+  }
+
+  function replyBody(element, raw = rawResponses()) {
+    if (provider !== "claude") return responseText(element);
+    const blocks = raw.filter(node => node === element || element.contains(node));
+    return blocks.length ? blocks.map(responseText).filter(Boolean).join("\n\n") : responseText(element);
   }
 
   function selectedWithin(element) {
@@ -651,35 +707,33 @@
 
   // A newer prompt or reply after this one means it is finished, even while the site writes the next reply.
   function followedByNewer(element) {
-    const later = [...config.responses, ...(config.prompts || [])].join(", ");
-    return [...document.querySelectorAll(later)].some((node) => visible(node) && !element.contains(node)
+    return [...responseElements(), ...promptElements()].some((node) => !element.contains(node) && !node.contains(element)
       && !!(element.compareDocumentPosition(node) & Node.DOCUMENT_POSITION_FOLLOWING));
   }
 
-  // Reads one reply, or only the part of it the user has selected.
-  function replyScope(element) {
-    return element.closest("[data-chatgpt-selection-message-id], [data-message-author-role='assistant'], [data-message-role='assistant'], [data-testid='assistant-message'], model-response") || element;
-  }
-
-  function replyText(element) {
-    const selected = selectedWithin(element);
+  // Reads a whole reply, or only the part explicitly selected on the page.
+  function replyText(element, { whole = false } = {}) {
+    element = replyScope(element);
+    const selected = whole ? "" : selectedWithin(element);
     if (selected) return { ok: true, text: checkedText(selected), partial: true };
     if (!followedByNewer(element)) assertIdle();
-    const files = globalThis.AISplitReplyFiles?.list(replyScope(element)) || [];
-    const text = responseText(element);
+    const files = globalThis.AISplitReplyFiles?.list(element) || [];
+    const text = replyBody(element);
     if (!text && !files.length) throw new Error(`This ${config.name} reply has no text or files to share. Select the text you want, then try again.`);
     return { ok: true, text: checkedText(text, files.length > 0), partial: false, ...(files.length ? { files } : {}) };
   }
 
-  async function readReply(element) {
-    if (selectedWithin(element)) return replyText(element);
+  async function readReply(element, options = {}) {
+    element = replyScope(element);
+    if (!options.whole && selectedWithin(element)) return replyText(element);
     if (!followedByNewer(element)) assertIdle();
     await globalThis.AISplitReplyFiles?.expand(replyScope(element));
-    return replyText(element);
+    if (!element.isConnected) throw new Error("This reply changed while reading it. Select it again.");
+    return replyText(element, options);
   }
 
   function latestReply() {
-    return replyAnchors().at(-1)?.response || responseElements().at(-1) || null;
+    return responseElements().at(-1) || replyAnchors().at(-1)?.response || null;
   }
 
   function getResponse() {
@@ -716,9 +770,9 @@
     const scopes = [];
     for (let scope = editor.parentElement; scope && scopes.length < 8; scope = scope.parentElement) scopes.push(scope);
     for (const scope of scopes) {
-      const group = (config.group || []).map((selector) => scope.querySelector(selector)).find(Boolean);
+      const group = (config.group || []).flatMap((selector) => [...scope.querySelectorAll(selector)]).find(visible);
       if (group) return { parent: group, before: [...group.children].find((child) => !ours(child)) || null };
-      const button = buttons.map((selector) => scope.querySelector(selector)).find(Boolean);
+      const button = buttons.flatMap((selector) => [...scope.querySelectorAll(selector)]).find(visible);
       if (button) return beforeIcons(slotFor(button, scope));
     }
     // An unrecognized layout: use the last button after the editor, which is where every site puts Send.
@@ -739,7 +793,7 @@
   function actionBars(known) {
     const bars = new Set();
     for (const button of document.querySelectorAll("button")) {
-      if (!REPLY_ACTION.test(actionLabel(button)) || button.closest("pre, [contenteditable='true']") || !visible(button)) continue;
+      if (!REPLY_ACTION.test(actionLabel(button)) || button.closest("pre, [contenteditable='true']") || !laidOut(button)) continue;
       for (let node = button.parentElement, depth = 0; node && node !== document.body && depth < 5; node = node.parentElement, depth++) {
         if (known.some((response) => node.contains(response))) break;
         if ([...node.querySelectorAll("button")].filter(isAction).length > 1) {
@@ -793,6 +847,60 @@
     return [...anchors].map(([response, place]) => ({ ...place, response }));
   }
 
+  function promptAnchors() {
+    const prompts = promptElements(), replies = responseElements(), anchors = [];
+    for (const response of prompts) {
+      for (let scope = response, depth = 0; scope && scope !== document.body && depth < 5; scope = scope.parentElement, depth++) {
+        if (prompts.some(other => other !== response && scope.contains(other)) || replies.some(reply => scope.contains(reply))) break;
+        const copy = [...scope.querySelectorAll("button")].find(button => laidOut(button)
+          && (isCopy(button) || /^copy (message|prompt)$/i.test(actionLabel(button))));
+        if (!copy) continue;
+        // Single-child tooltip wrappers are common in action rows.
+        const slot = slotFor(copy, scope);
+        anchors.push({ ...placeInBar(slot.parentElement), response });
+        break;
+      }
+    }
+    return anchors;
+  }
+
+  function messages() {
+    const raw = rawResponses();
+    const entries = [
+      ...promptElements().map(element => ({ element, role: "user", text: responseText(element) })),
+      ...responseElements(raw).map(element => ({ element, role: "assistant", text: replyBody(element, raw), files: globalThis.AISplitReplyFiles?.list(element) || [] })),
+    ];
+    return entries.filter(entry => entry.text || entry.files?.length).sort((a, b) =>
+      a.element.compareDocumentPosition(b.element) & Node.DOCUMENT_POSITION_FOLLOWING ? -1 : 1);
+  }
+
+  async function readMessage(element) {
+    const entry = messages().find(message => message.element === element);
+    if (!entry) throw new Error("This message is no longer on the page. Select it again.");
+    if (entry.role === "assistant") return readReply(element);
+    const selected = selectedWithin(element);
+    return { ok: true, text: checkedText(selected || entry.text), partial: !!selected, prompt: true };
+  }
+
+  async function readMessages(elements) {
+    if (!Array.isArray(elements) || !elements.length) throw new Error("Select at least one message to share.");
+    const wanted = new Set(elements), available = messages();
+    const selected = available.filter(entry => wanted.has(entry.element));
+    if (selected.length !== wanted.size) throw new Error("Some selected messages are no longer on the page. Select them again.");
+    const url = location.href, parts = [], files = [];
+    for (const entry of selected) {
+      // Checkbox selection always means the whole message, regardless of highlighted text.
+      const result = entry.role === "assistant" ? await readReply(entry.element, { whole: true })
+        : { text: responseText(entry.element) };
+      if (location.href !== url || !selected.every(item => item.element.isConnected)) {
+        throw new Error("The conversation changed while reading it. Select the messages again.");
+      }
+      parts.push(`${entry.role === "user" ? "You" : config.name}:\n${result.text || "[Generated files attached]"}`);
+      files.push(...(result.files || []));
+    }
+    return { ok: true, text: checkedText(parts.join("\n\n---\n\n")), files, partial: false, conversation: true };
+  }
+
   // The composer carries the site's real UI font and colors; some sites leave the page body at browser defaults.
   function styleSource() {
     try { return firstMatch(config.editors) || document.body; } catch { return document.body; }
@@ -829,7 +937,7 @@
     getDraft: () => ({ ok: true, text: readEditor(getEditor()) }),
     readPrompt, canLeave, preflight, stage, validate, commit, keep, cancel, insert, getResponse, replyText,
     readReplyFiles: files => globalThis.AISplitReplyFiles.read(files),
-    readReply,
+    readReply, messages, readMessage, readMessages, promptAnchors,
     readResponse: async () => { getResponse(); return readReply(latestReply()); },
     composerAnchor, replyAnchors, ownsEditor, styleSource, busy,
   });

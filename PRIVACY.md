@@ -1,33 +1,32 @@
 # AI Split Bridge privacy policy
 
-Last updated: 23 October 2026
+Last updated: 17 November 2026
 
-AI Split Bridge is a Chrome extension for sending one prompt to several AI chats and sharing replies between them. It runs entirely in your browser. The developer runs no server and receives none of your data.
+AI Split Bridge is a Chrome extension for sending one prompt to several AI chats and sharing selected prompts, replies, and generated files between them. It runs entirely in your browser. The developer runs no server and receives none of your data.
 
 ## What the extension handles
 
-- **Prompts**: the text, links, and attached files in the composer of ChatGPT, Claude, Gemini, or Grok. They are read only when you click **Send both** (or use its shortcut).
-- **Replies**: the text and detected generated files of a reply. The share menu lists included files, and you can uncheck them to share text only. File contents are read only after you choose a destination. Claude Docs cards are exported as a Word copy of the current saved document.
+- **Composer content**: text, links, and attached files in ChatGPT, Claude, Gemini, or Grok, transferred when you click **Send both** or another send control, or use its shortcut. The extension also checks the composer to protect existing drafts. Files added while the extension is loaded are held by reference in page memory; their bytes are read when you send them.
+- **Selected messages**: rendered text from your prompts and the assistants’ replies, read when you use **Share with…** or **Select messages…**. The picker lists messages currently loaded on the page. It does not retrieve unloaded history or original attachments from past prompts.
+- **Generated files**: when you choose a destination with the share menu’s files checkbox enabled, the extension uses recognized download/export controls in the selected replies to read the files. This can request a download from the source provider or its file host; same-origin downloads use your existing site session. File contents are held in memory for transfer, not saved to your Downloads folder by the extension.
 - **Open AI tabs**: the titles and addresses of ChatGPT, Claude, Gemini, and Grok tabs in the current window, used to list the chats you can send to and to tell which side of Split View each one is on. Other tabs and sites are not accessed.
-- **Share settings**: whether shared replies are sent right away, and the message you wrote to go with them.
+- **Share settings**: whether shared messages are sent right away, and the templates you wrote to accompany replies, your prompts, and selected conversations.
 
 ## How it is used
 
-Only to carry out the action you clicked. The prompt or reply is placed in the composer of each chat you chose, including uploads of the files you included. In draft mode it is left there for review; otherwise that site's own Send button is clicked. The files and message are handled by that AI provider under its own privacy policy, exactly as if you had attached and typed them there yourself.
-
-For generated files, the extension uses the source site's download or export control and reads the resulting file in memory. This can request the file from that provider's file service under the page's normal access rules. The temporary download capture runs in the source page, has no extension APIs, and is removed after success, failure, or a 30-second timeout. It does not monitor downloads in other tabs.
+Only to carry out the action you clicked. Selected text and file copies pass between content scripts and the extension's service worker, then into each chat you chose. Shared text can be left as a draft or submitted using the site's own Send button. Files are uploaded to the destination provider when staged, even in draft mode or if the later submission fails. The source site's downloads and destination site's uploads and messages are handled under those providers' privacy policies.
 
 ## Where it is stored
 
 - **Share settings** are saved in Chrome's sync storage, so they follow your Chrome profile if Chrome sync is on.
 - **Session memory**: recently used tab IDs and, when a pane has to be navigated, the conversation address each pane showed. These are kept in Chrome's session storage for the current window, removed when the window closes, and cleared when Chrome quits.
-- **Prompts, replies, and attachments are not stored.** They stay in memory only while being moved between your tabs.
+- **Prompts, replies, and file contents are not saved in extension storage.** Composer file references and temporary transfer copies stay in memory. Content placed in a destination chat may be retained by that provider, including uploaded files in an unsent draft.
 
 ## What it does not do
 
-- It sends nothing to the developer, analytics services, or unrelated third parties. The only file requests are for the downloads you choose to share and uploads to your chosen AI chat.
+- It sends nothing to the developer or analytics services. Network activity is limited to the source site's file downloads and the AI sites you choose for uploads and messages.
 - It has no analytics, tracking, advertising, or remote code.
-- Your data is not sold, not used for advertising or to determine creditworthiness, not used for anything unrelated to the features above, and not read by people.
+- The developer does not sell your data, use it for advertising or creditworthiness, use it for unrelated purposes, or read your conversations. Each AI provider's own data practices still apply.
 
 ## Limited Use
 
@@ -36,7 +35,7 @@ The use of information received through this extension adheres to the [Chrome We
 ## Permissions
 
 - `storage`: for the share settings and the session memory described above.
-- Access to `chatgpt.com`, `chat.openai.com`, `claude.ai`, `gemini.google.com`, and `grok.com`: to add the extension's controls to those sites, and to read and fill their composers when you use the controls. No other site is accessed.
+- Access to `chatgpt.com`, `chat.openai.com`, `claude.ai`, `gemini.google.com`, and `grok.com`: to add the controls, read selected messages and generated downloads, and protect and fill composers. No broad browsing, clipboard, or downloads permission is requested. Generated files may be downloaded from a file URL supplied by the source site.
 
 ## Your choices
 

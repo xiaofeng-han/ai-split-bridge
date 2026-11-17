@@ -1,6 +1,6 @@
 // Local-only UI and real-browser editing fixture. No AI website is contacted.
 // Host matching is substituted in the served adapter; extension source is unchanged.
-// Options: ?provider=chatgpt|claude|gemini|grok, &theme=dark, &split=none.
+// Options: ?provider=chatgpt|claude|gemini|grok, &theme=dark, &split=none, &layout=project|new.
 import { createServer } from 'node:http';
 import { readFile } from 'node:fs/promises';
 
@@ -8,10 +8,6 @@ const pdfFixtures = await Promise.all(['a', 'b'].map(async letter => ({
   name: `bridge-test-${letter}.pdf`, type: 'application/pdf',
   data: (await readFile(new URL(`./fixtures/bridge-test-${letter}.pdf`, import.meta.url))).toString('base64'),
 })));
-const docFixture = {
-  name: 'Generated course plan.docx', type: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
-  data: (await readFile(new URL('./fixtures/bridge-generated.docx', import.meta.url))).toString('base64'),
-};
 
 const hosts = { chatgpt: 'chatgpt.com', claude: 'claude.ai', gemini: 'gemini.google.com', grok: 'grok.com' };
 const names = { chatgpt: 'ChatGPT', claude: 'Claude', gemini: 'Gemini', grok: 'Grok' };
@@ -22,10 +18,25 @@ const glyph = {
   mic: icon.replace('PATH', 'M10 3v9M7 6v3a3 3 0 0 0 6 0V6M5 10a5 5 0 0 0 10 0M10 15v2'),
   send: icon.replace('PATH', 'M10 15V5M6 9l4-4 4 4'),
 };
+const prompt = (provider, text, i) => {
+  const actions = `<div class="actions"><button aria-label="Copy prompt" id="prompt-copy-${i}" data-copy-message>${glyph.copy}</button><button aria-label="Edit prompt">✎</button></div>`;
+  const bubble = `<div class="user">${text}</div>`;
+  if (provider === 'chatgpt') return `<article class="prompt-turn"><div data-message-author-role="user">${bubble}</div>${actions}</article>`;
+  if (provider === 'claude') return `<div class="prompt-turn" data-turn-key="user-${i}"><div data-testid="user-message">${bubble}</div>${actions}</div>`;
+  if (provider === 'gemini') return `<user-query class="prompt-turn">${bubble}${actions}</user-query>`;
+  return `<div class="prompt-turn" data-testid="user-message" data-message-author-role="user">${bubble}${actions}</div>`;
+};
+const markdownCard = (name, text) => `<div class="file-card" data-testid="file-card-block">
+  <button data-testid="file-card-open" aria-label="View ${name}">${name}</button><span>MD</span>
+  <button data-fixture-download="${name}" data-fixture-content="${text}" aria-label="Download ${name}">Download</button></div>`;
 const replies = {
-  chatgpt: (text, i) => `<article class="turn"><div data-message-author-role="assistant"><div class="markdown">${text}</div>${i === 2 ? '<span class="generated"><button type="button" aria-label="Open preview of bridge-test-a.pdf">bridge-test-a.pdf</button><button type="button" aria-label="Download file" id="generated-download">Download file</button></span>' : ''}</div>
+  chatgpt: (text, i) => `<article class="turn"><div data-message-author-role="assistant"><div class="markdown">${text}</div></div>
     <div class="actions"><span><button data-testid="copy-turn-action-button" aria-label="Copy" id="copy-${i}">${glyph.copy}</button></span><button aria-label="Good response">${glyph.like}</button></div></article>`,
-  claude: (text, i) => `<div class="turn"><div data-testid="assistant-message" class="font-claude-response">${text}</div>
+  claude: (text, i) => `<div class="turn" data-turn-key="assistant-${i}"><div data-testid="assistant-message" class="font-claude-response">${text}</div>
+    ${i === 2 ? `<div class="font-claude-response"><p>I also prepared two Markdown documents with the next steps.</p></div>
+    ${markdownCard('onboarding.md', '# Onboarding plan&#10;&#10;Send a welcome message.&#10;')}
+    <div class="font-claude-response"><p>The second document lists the assumptions to verify.</p></div>
+    ${markdownCard('assumptions.md', '# Assumptions&#10;&#10;Validate monthly churn before launch.&#10;')}` : ''}
     <div class="actions"><button data-testid="action-bar-copy" aria-label="Copy" id="copy-${i}">${glyph.copy}</button><button aria-label="Give positive feedback">${glyph.like}</button></div></div>`,
   gemini: (text, i) => `<model-response class="turn"><div class="model-response-text">${text}</div>
     <div class="actions"><button aria-label="Good response">${glyph.like}</button><button data-test-id="copy-button" aria-label="Copy" id="copy-${i}">${glyph.copy}</button></div></model-response>`,
@@ -70,6 +81,19 @@ const composers = {
     <div class="trail"><button type="button" class="model">Fast</button><div>${send.replace('ATTRS', 'data-testid="chat-submit" aria-label="Submit"')}</div></div></div>`,
 };
 
+function composer(provider, layout) {
+  if (provider === 'chatgpt' && layout === 'project') return `<section class="project"><h2>Course project</h2>
+    <div class="composer compact"><div contenteditable="true" data-composer-markdown role="textbox" aria-label="New chat in Course project" data-placeholder="New chat in Course project"></div>
+      <div class="trail"><button type="button" id="site-voice" aria-label="Start voice mode">${glyph.mic}</button>
+      <span id="send-slot" hidden>${send.replace('ATTRS', 'data-testid="send-button" aria-label="Send prompt"')}</span></div></div></section>`;
+  if (provider === 'claude' && layout === 'new') return `<section class="welcome"><h2>Let’s noodle</h2>
+    <fieldset class="composer"><div class="ProseMirror" contenteditable="true" data-testid="chat-input" role="textbox" aria-label="Write your prompt to Claude" data-placeholder="How can I help you today?"></div>
+      <div class="trail"><button type="button" class="model">Opus</button>
+      <div id="send-slot" style="opacity:0;pointer-events:none;width:0;overflow:hidden">${send.replace('ATTRS', 'data-testid="chat-input-send" aria-label="Send message"')}<span aria-hidden="true"></span></div>
+      <button type="button" id="site-voice" aria-label="Use voice mode">${glyph.mic}</button></div></fieldset></section>`;
+  return composers[provider];
+}
+
 function context(provider, split) {
   const others = Object.keys(hosts).filter(key => key !== provider);
   const [peer, other, closed] = others;
@@ -89,32 +113,14 @@ const server = createServer(async (req, res) => {
     const provider = Object.hasOwn(hosts, url.searchParams.get('provider')) ? url.searchParams.get('provider') : 'chatgpt';
     const dark = url.searchParams.get('theme') === 'dark';
     const split = url.searchParams.get('split') !== 'none';
+    const layout = ['project', 'new'].includes(url.searchParams.get('layout')) ? url.searchParams.get('layout') : 'chat';
+    const empty = (provider === 'chatgpt' && layout === 'project') || (provider === 'claude' && layout === 'new');
     const file = url.pathname.slice(1);
-    if (file === 'code/artifact/fixture-doc') {
-      res.setHeader('Content-Type', 'text/html; charset=utf-8');
-      return res.end(`<!doctype html><html><body><div role="dialog" aria-label="Generated course plan"><h2>Generated course plan</h2>
-        <span role="radio" tabindex="0" id="export">Export</span>
-        <button id="word" hidden>Word, Editable .docx document</button><button aria-label="Close" id="close">Close</button></div>
-        <script>
-          document.getElementById('export').onclick=()=>document.getElementById('word').hidden=false;
-          document.getElementById('word').onclick=()=>{
-            const binary=atob(${JSON.stringify(docFixture.data)});
-            const link=document.createElement('a');link.download=${JSON.stringify(docFixture.name)};
-            link.href=URL.createObjectURL(new Blob([Uint8Array.from(binary,c=>c.charCodeAt(0))],{type:${JSON.stringify(docFixture.type)}}));
-            link.click();URL.revokeObjectURL(link.href);
-          };
-          document.getElementById('close').onclick=()=>window.frameElement.remove();
-        </script></body></html>`);
-    }
-    if (['download-capture.js', 'reply-files.js', 'adapters.js', 'content.js', 'popup.js', 'popup.css', 'settings.js'].includes(file)) {
+    if (['adapters.js', 'content.js', 'popup.js', 'popup.css', 'settings.js', 'reply-files.js', 'download-capture.js'].includes(file)) {
       let source = await readFile(new URL(`../extension/${file}`, import.meta.url), 'utf8');
       if (file === 'adapters.js') source = source.replace('hosts.includes(location.hostname)', `hosts.includes(${JSON.stringify(hosts[provider])})`);
       res.setHeader('Content-Type', file.endsWith('.css') ? 'text/css' : 'text/javascript');
       return res.end(source);
-    }
-    if (file === 'generated-report.pdf') {
-      res.setHeader('Content-Type', 'application/pdf');
-      return res.end(Buffer.from(pdfFixtures[0].data, 'base64'));
     }
     if (/^icons\/[\w-]+\.png$/.test(file)) {
       res.setHeader('Content-Type', 'image/png');
@@ -140,6 +146,8 @@ const server = createServer(async (req, res) => {
     const links = [...Object.keys(hosts).map(key => `<a href="/?provider=${key}${dark ? '&theme=dark' : ''}">${names[key]}</a>`),
       `<a href="/?provider=${provider}${dark ? '' : '&theme=dark'}${split ? '' : '&split=none'}">${dark ? 'Light' : 'Dark'}</a>`,
       `<a href="/?provider=${provider}${dark ? '&theme=dark' : ''}${split ? '&split=none' : ''}">${split ? 'No split' : 'Split'}</a>`,
+      `<a href="/?provider=chatgpt&layout=project${dark ? '&theme=dark' : ''}">Project</a>`,
+      `<a href="/?provider=claude&layout=new${dark ? '&theme=dark' : ''}">New Claude chat</a>`,
       '<a href="/popup.html">Popup</a>'].join('');
     res.end(`<!doctype html><html lang="en"><meta charset="utf-8"><title>${names[provider]} — bridge fixture</title>
       <style>
@@ -148,6 +156,7 @@ const server = createServer(async (req, res) => {
         main {max-width:720px;margin:0 auto;padding:16px 20px 40px}
         nav {display:flex;gap:14px;font-size:13px;padding:10px 0 24px;color:var(--muted)} nav a {color:inherit}
         .user {margin:24px 0 24px auto;width:fit-content;max-width:70%;padding:10px 16px;border-radius:18px;background:var(--bubble)}
+        .prompt-turn {display:block;margin-bottom:24px}.prompt-turn .user {margin-bottom:5px}.prompt-turn .actions {justify-content:flex-end}
         .turn {display:block;margin-bottom:24px} .turn p {margin:0 0 12px} ${provider === 'claude' ? '.turn p {font-family:Georgia,serif}' : ''}
         .actions {display:flex;gap:2px;align-items:center;margin-left:-6px}
         .actions button {display:grid;place-items:center;width:var(--action-size);height:var(--action-size);border:0;border-radius:var(--action-radius);background:none;color:var(--muted);cursor:pointer}
@@ -160,6 +169,10 @@ const server = createServer(async (req, res) => {
         .trail button {display:grid;place-items:center;width:var(--button-size);height:var(--button-size);border:0;border-radius:var(--button-radius);background:none;color:var(--muted);cursor:pointer}
         .trail .model {width:auto;padding:0 12px;font-size:14px;margin-right:auto}
         .trail div {display:flex;align-items:center;gap:6px}
+        [hidden] {display:none!important}.compact {display:flex;align-items:center;gap:8px}.compact [contenteditable] {flex:1;min-width:0}
+        .project,.welcome {margin:64px 0 80px}.welcome h2 {text-align:center;font-family:Georgia,serif;font-weight:400}
+        .file-card {display:flex;align-items:center;gap:8px;padding:12px;border:1px solid var(--muted);border-radius:10px;margin:10px 0;font-size:13px}
+        .file-card button {background:none;color:var(--fg);border:0;cursor:pointer}.file-card button:last-child {margin-left:auto}
         #site-send {background:var(--send);color:var(--on-send)}
         .tiles {display:flex;flex-wrap:wrap;gap:6px} .tiles:not(:empty) {margin-bottom:6px}
         .tile {display:flex;align-items:center;gap:6px;padding:6px 6px 6px 12px;border-radius:12px;background:var(--bubble);font-size:13px}
@@ -169,24 +182,17 @@ const server = createServer(async (req, res) => {
       </style>
       <main>
         <nav>${links}</nav>
-        <div class="user">Can you check the pricing assumptions in this plan?</div>
+        ${empty ? '' : `${prompt(provider, 'Can you check the pricing assumptions in this plan?', 1)}
         ${replies[provider]('<p>The plan assumes a 4% monthly churn, which is optimistic for a new product.</p><p>I would test the price with a smaller group first.</p>', 1)}
-        <div class="user">What would you change first?</div>
-        ${replies[provider]('<p>Start with the onboarding email: it carries most of the conversion.</p>' + (provider === 'chatgpt' ? '' : provider === 'claude'
-          ? '<div data-sheet-kind="doc"><button type="button" data-testid="frame-card-open" aria-label="View Generated course plan">Generated course plan</button><button type="button" data-testid="frame-card-share" aria-label="Share Generated course plan">Share/export</button></div>'
-          : '<p><a download="bridge-test-a.pdf" href="/generated-report.pdf">Download the generated report</a></p>'), 2)}
-        ${composers[provider]}
+        ${prompt(provider, 'What would you change first?', 2)}
+        ${replies[provider]('<p>Start with the onboarding email: it carries most of the conversion.</p>', 2)}`}
+        ${composer(provider, layout)}
         <section class="checks"><b>Fixture</b> · ${names[provider]} · no requests to AI services
           <div><button id="run" type="button">Run editor checks</button></div><pre id="results" role="status">Not run yet.</pre>
           <label for="destination">Last message the extension would send</label><textarea id="destination" readonly></textarea>
         </section>
       </main>
       <script>
-        const docShare=document.querySelector('[data-testid="frame-card-share"]');
-        if(docShare)docShare.onclick=()=>{
-          const frame=document.createElement('iframe');frame.src='/code/artifact/fixture-doc';frame.title='Generated course plan';
-          frame.style.cssText='position:fixed;inset:20%;width:60%;height:40%;background:white;z-index:10000';document.body.append(frame);
-        };
         const fixtureContext = ${JSON.stringify(context(provider, split))};
         const named = ids => ids.map(id => fixtureContext.chats.find(chat => chat.id === id).name).join(' and ');
         const record = m => { document.getElementById('destination').value = JSON.stringify(m, null, 2); };
@@ -200,16 +206,19 @@ const server = createServer(async (req, res) => {
         }}};
       </script><script src="/download-capture.js"></script><script src="/reply-files.js"></script><script src="/adapters.js?provider=${provider}"></script><script src="/content.js"></script>
       <script>
-        const generatedDownload=document.getElementById('generated-download');
-        if(generatedDownload)generatedDownload.onclick=()=>{
-          const binary=atob(${JSON.stringify(pdfFixtures[0].data)});
-          const blob=new Blob([Uint8Array.from(binary,c=>c.charCodeAt(0))],{type:'application/pdf'});
-          const link=document.createElement('a');link.download='bridge-test-a.pdf';link.href=URL.createObjectURL(blob);
-          link.click();URL.revokeObjectURL(link.href);
-        };
         const editor=document.querySelector('.composer [contenteditable]'); let clicks=0;let inputs=0;
         document.getElementById('site-send').onclick=()=>clicks++;
         editor.addEventListener('input',()=>inputs++);
+        ${empty ? `editor.addEventListener('input',()=>{
+          const filled=!!editor.textContent.trim();const slot=document.getElementById('send-slot');
+          slot.hidden=!filled;slot.style.cssText=filled?'':'opacity:0;pointer-events:none;width:0;overflow:hidden';
+          document.getElementById('site-voice').hidden=filled;
+        });` : ''}
+        for(const button of document.querySelectorAll('[data-fixture-download]')) button.onclick=()=>{
+          const file=new Blob([button.dataset.fixtureContent],{type:'text/markdown'});const url=URL.createObjectURL(file);
+          const link=document.createElement('a');link.href=url;link.download=button.dataset.fixtureDownload;link.click();
+          setTimeout(()=>URL.revokeObjectURL(url),1000);
+        };
         // Like the real sites: pasted, dropped, or picked files become removable tiles above the editor.
         const box=document.querySelector('.composer');const tiles=document.createElement('div');tiles.className='tiles';box.prepend(tiles);
         const picker=Object.assign(document.createElement('input'),{type:'file',multiple:true,hidden:true});box.append(picker);
@@ -240,8 +249,18 @@ const server = createServer(async (req, res) => {
             editor.replaceChildren();await a.insert({text:'A shared draft'});
             check(a.getDraft().text==='A shared draft'&&clicks===1,'Sharing inserts without submitting');
             const anchors=a.replyAnchors();
-            check(anchors.length===2&&anchors.every((x,i)=>x.parent.contains(document.getElementById('copy-'+(i+1)))),'Each reply anchors in its own action bar');
+            check(anchors.length===${empty ? 0 : 2}&&anchors.every((x,i)=>x.parent.contains(document.getElementById('copy-'+(i+1)))),'Each reply anchors in its own action bar');
             check(a.composerAnchor().parent.contains(document.getElementById('site-send')),'Composer anchors in the Send button group');
+            const messages=a.messages();check(messages.length===${empty ? 0 : 4},'User prompts and complete replies appear once in the message picker');
+            ${empty ? '' : `check(messages.map(message=>message.role).join(',')==='user,assistant,user,assistant','Message picker preserves alternating conversation order');
+            const transcript=await a.readMessages(messages.map(message=>message.element));
+            check(transcript.conversation&&transcript.text.includes('Can you check')&&transcript.text.includes('Start with the onboarding'),'Selected messages include both prompts and replies');`}
+            ${provider === 'claude' && !empty ? `
+            const last=await a.readMessage(messages.at(-1).element);
+            check(last.text.includes('two Markdown documents')&&last.text.includes('second document'),'Every markdown block in one Claude reply is included');
+            check(last.files.length===2,'Both generated Markdown files belong to the same reply');
+            const copies=await a.readReplyFiles(last.files);
+            check(copies.length===2&&copies.map(file=>file.name).join(',')==='onboarding.md,assumptions.md','Both local Markdown files can be copied');` : ''}
             editor.innerHTML='<p>See <span contenteditable="false"><a href="https://example.com/a">example.com/a</a></span> then <span contenteditable="false">Create image</span></p>';
             check(a.getDraft().text==='See https://example.com/a then Create image','Link and tool chips read as text');
             editor.replaceChildren();tiles.replaceChildren();
@@ -265,15 +284,6 @@ const server = createServer(async (req, res) => {
             const bytes=await Promise.all(received.map(async file=>btoa(String.fromCharCode(...new Uint8Array(await file.arrayBuffer())))));
             check(bytes.every((data,i)=>data===pdfs[i].data),'Both PDF files arrive byte-for-byte intact');
             await a.cancel(pdfRequest);check(tiles.children.length===0&&a.getDraft().text==='','Two-file rollback leaves an empty destination');
-            const generated=a.getResponse();
-            check(generated.files?.length===1,'Generated file is discovered in its own reply');
-            const sharedFiles=await a.readReplyFiles(generated.files);
-            check(sharedFiles[0].data===${JSON.stringify((provider === 'claude' ? docFixture : pdfFixtures[0]).data)},'Generated file download preserves every byte');
-            const sharedDraft={requestId:crypto.randomUUID(),text:'Review the generated report.',source:false,attachments:1};
-            a.preflight(sharedDraft);await a.stage({...sharedDraft,files:sharedFiles});await a.validate(sharedDraft);a.keep(sharedDraft);
-            await a.cancel(sharedDraft);
-            check(tiles.children.length===1&&a.getDraft().text===sharedDraft.text,'Kept shared draft retains its file without submitting or rollback');
-            tiles.replaceChildren();editor.replaceChildren();
             ${provider === 'chatgpt' ? `
             const card=document.createElement('span');card.className='composer-attachment-surface';
             card.innerHTML='<span>Truncated long paste…</span><button type="button">Show in text field</button><button type="button" aria-label="Remove pasted text attachment">×</button>';
