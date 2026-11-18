@@ -102,10 +102,30 @@ function context(provider, split) {
     { id: 3, provider: other, name: names[other], title: 'Launch checklist', side: null },
   ];
   return {
-    ok: true, selfId: 1, provider, side: split ? 'left' : null, native: split, canManageSplit: false, switchMode: 'navigate',
+    ok: true, selfId: 1, provider, side: split ? 'left' : null, native: split, canManageSplit: false, switchMode: 'navigate', shareMode: 'send',
     peer: split ? chats[0] : null, chats, closed: [{ provider: closed, name: names[closed], remembered: false }],
   };
 }
+
+// Mock extension-local reading preferences in the local preview only.
+const readingStorage = `(() => {
+  const data = JSON.parse(sessionStorage.getItem('fixture-reading') || '{}');
+  const listeners = [];
+  function save(key, value) {
+    const before = data[key];
+    if (value === undefined) delete data[key]; else data[key] = value;
+    sessionStorage.setItem('fixture-reading', JSON.stringify(data));
+    for (const fn of listeners) fn({[key]: {oldValue: before, newValue: value}}, 'local');
+  }
+  chrome.storage ||= {};
+  chrome.storage.local = {
+    async get(keys) { return Object.fromEntries([].concat(keys).filter(key => key in data).map(key => [key, data[key]])); },
+    async getKeys() { return Object.keys(data); },
+    async set(obj) { for (const [key, value] of Object.entries(obj)) save(key, value); },
+    async remove(key) { save(key); }
+  };
+  chrome.storage.onChanged = {addListener(fn) { listeners.push(fn); }};
+})();`;
 
 const server = createServer(async (req, res) => {
   try {
@@ -116,7 +136,7 @@ const server = createServer(async (req, res) => {
     const layout = ['project', 'new'].includes(url.searchParams.get('layout')) ? url.searchParams.get('layout') : 'chat';
     const empty = (provider === 'chatgpt' && layout === 'project') || (provider === 'claude' && layout === 'new');
     const file = url.pathname.slice(1);
-    if (['adapters.js', 'content.js', 'popup.js', 'popup.css', 'settings.js', 'reply-files.js', 'download-capture.js'].includes(file)) {
+    if (['adapters.js', 'content.js', 'popup.js', 'popup-reading.js', 'popup.css', 'reading.js', 'reading-turns.js', 'reading-width.js', 'providers.js', 'settings.js', 'reply-files.js', 'download-capture.js'].includes(file)) {
       let source = await readFile(new URL(`../extension/${file}`, import.meta.url), 'utf8');
       if (file === 'adapters.js') source = source.replace('hosts.includes(location.hostname)', `hosts.includes(${JSON.stringify(hosts[provider])})`);
       res.setHeader('Content-Type', file.endsWith('.css') ? 'text/css' : 'text/javascript');
@@ -132,7 +152,7 @@ const server = createServer(async (req, res) => {
       return res.end(html.replace('<head>', `<head><script>
         const synced = JSON.parse(sessionStorage.getItem('fixture-sync') || '{}');
         window.chrome = {storage:{sync:{
-          async get(key) { return key in synced ? {[key]: synced[key]} : {}; },
+          async get(key) { return key == null ? {...synced} : (key in synced ? {[key]: synced[key]} : {}); },
           async set(value) { Object.assign(synced, value); sessionStorage.setItem('fixture-sync', JSON.stringify(synced)); },
         }}, runtime:{async sendMessage(m) {
           if (m.type === 'ASB_LIST') return {ok:true,canManageSplit:false,activeId:1,peer:{id:2,name:'Claude'},tabs:[
@@ -141,6 +161,8 @@ const server = createServer(async (req, res) => {
           ]};
           return {ok:true,message:'Fixture only: no browser tabs changed.'};
         }}};
+        chrome.tabs = { async query() { return []; } };
+        ${readingStorage}
       </script>`));
     }
     const links = [...Object.keys(hosts).map(key => `<a href="/?provider=${key}${dark ? '&theme=dark' : ''}">${names[key]}</a>`),
@@ -194,17 +216,37 @@ const server = createServer(async (req, res) => {
       </main>
       <script>
         const fixtureContext = ${JSON.stringify(context(provider, split))};
+        let simulatedReview = null;
         const named = ids => ids.map(id => fixtureContext.chats.find(chat => chat.id === id).name).join(' and ');
         const record = m => { document.getElementById('destination').value = JSON.stringify(m, null, 2); };
         window.chrome = {runtime:{id:'fixture',onMessage:{addListener(){}},async sendMessage(m){
           if (m.type === 'ASB_CONTEXT') return fixtureContext;
+          if (m.type === 'ASB_COMPARE_STATUS') return {ok:true,ready:true,turns:['fixture-left','fixture-right']};
+          if (m.type === 'ASB_REVIEW_STATUS') {
+            const ready = fixtureContext.native && ${JSON.stringify(!empty)};
+            return {ok:true,ready,turns:['fixture-left','fixture-right'],revision:simulatedReview,
+              message:ready ? '' : 'Open a split fixture with completed answers.'};
+          }
           record(m);
+          if (m.type === 'ASB_CROSS_REVIEW') {
+            simulatedReview = {reviewId:'fixture-round',turns:['fixture-critique-left','fixture-critique-right']};
+            return {ok:true,message:'Fixture: both critiques simulated. Open Cross-review to choose a revision.'};
+          }
+          if (m.type === 'ASB_REVISE') {
+            const reviser = m.targetId === fixtureContext.selfId ? ${JSON.stringify(names[provider])} : fixtureContext.peer.name;
+            return {ok:true,message:'Fixture: ' + reviser + ' would revise its original answer.'};
+          }
+          if (m.type === 'ASB_COMPARE') {
+            const reviewer = m.targetId === fixtureContext.selfId ? ${JSON.stringify(names[provider])} : fixtureContext.peer.name;
+            return {ok:true,message:'Fixture: ' + reviewer + ' would compare both answers.'};
+          }
           if (m.type === 'ASB_SEND') return {ok:true,message:'Fixture: would send to ' + named(m.targetIds) + '. Nothing sent.'};
           if (m.type === 'ASB_SHARE') return {ok:true,message:'Fixture: the reply would be shared. Nothing sent.'};
           if (m.type === 'ASB_SHOW') return {ok:true,message:'Fixture: no tabs changed.'};
           return {ok:false,error:'This local fixture does not handle ' + m.type + '.'};
         }}};
-      </script><script src="/download-capture.js"></script><script src="/reply-files.js"></script><script src="/adapters.js?provider=${provider}"></script><script src="/content.js"></script>
+        ${readingStorage}
+      </script><script src="/download-capture.js"></script><script src="/reply-files.js"></script><script src="/adapters.js?provider=${provider}"></script><script src="/reading-width.js"></script><script src="/reading-turns.js"></script><script src="/reading.js"></script><script src="/content.js"></script>
       <script>
         const editor=document.querySelector('.composer [contenteditable]'); let clicks=0;let inputs=0;
         document.getElementById('site-send').onclick=()=>clicks++;

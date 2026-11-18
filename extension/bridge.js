@@ -1,4 +1,5 @@
 import { PROVIDERS } from './providers.js';
+import { composeComparison, REVIEW_TEMPLATES } from './settings.js';
 
 const MAX_TARGETS = 8;
 const MAX_FILES = 10;
@@ -47,9 +48,13 @@ export function createBridge(api, manager, { retryDelay = 500, retryLimit = 40 }
     // Copies go out once, when staging; the source keeps and sends its own attachments.
     const payload = (id, type) => id === sourceId ? { requestId, text, source: true }
       : { requestId, text, source: false, attachments: files.length, ...(type === 'ASB_STAGE' ? { files } : {}) };
+    return deliverMany({ ids, labels, requestId, payload, verify: async () => chosen(await manager.context(sourceId), targetIds) });
+  }
+
+  async function deliverMany({ ids, labels, requestId, payload, verify, sendNow = true }) {
     async function phase(type) {
       // Wait for every chat even when one fails before cancelling any of them.
-      const results = await Promise.allSettled(ids.map(id => ask(id, type, payload(id, type))));
+      const results = await Promise.allSettled(ids.map((id, i) => ask(id, type, payload(id, type, i))));
       const errors = results.flatMap((r, i) => r.status === 'rejected' ? [`${labels[i]}: ${r.reason.message}`] : []);
       if (errors.length) throw new Error(errors.join(' '));
     }
@@ -57,21 +62,22 @@ export function createBridge(api, manager, { retryDelay = 500, retryLimit = 40 }
       await phase('ASB_PREPARE');
       await phase('ASB_STAGE');
       await phase('ASB_VALIDATE');
-      chosen(await manager.context(sourceId), targetIds);
+      await verify();
     } catch (error) {
       const cleanup = await Promise.allSettled(ids.map(id => ask(id, 'ASB_CANCEL', { requestId })));
       const left = labels.filter((_, i) => cleanup[i].value?.leftAttachments);
       throw new Error(`Nothing was sent. ${error.message}${left.length ? ` Remove the copied attachments still in ${list(left)}.` : ''}`);
     }
     // Separate websites cannot be submitted atomically. Never retry a click automatically.
-    const results = await Promise.allSettled(ids.map(id => ask(id, 'ASB_COMMIT', { requestId })));
+    const results = await Promise.allSettled(ids.map(id => ask(id, sendNow ? 'ASB_COMMIT' : 'ASB_KEEP', { requestId })));
     await Promise.allSettled(ids.map(id => ask(id, 'ASB_CANCEL', { requestId })));
     const failed = results.flatMap((result, i) => result.status === 'rejected'
-      ? [`${labels[i]}: ${result.reason.message} Delivery is unconfirmed; check this chat before sending again.`] : []);
+      ? [`${labels[i]}: ${result.reason.message} ${sendNow ? 'Delivery is unconfirmed; check this chat before sending again.' : 'Check the draft in this chat.'}`] : []);
     const sent = labels.filter((_, i) => results[i].status === 'fulfilled');
+    const success = sent.length ? `${sendNow ? 'Sent to' : 'Draft ready in'} ${list(sent)}.` : '';
     return {
       ok: true, partial: failed.length > 0,
-      message: failed.length ? `${sent.length ? `Sent to ${list(sent)}. ` : ''}${failed.join(' ')}` : `Sent to ${list(labels)}.`,
+      message: [success, ...failed].filter(Boolean).join(' '),
     };
   }
 
@@ -89,13 +95,13 @@ export function createBridge(api, manager, { retryDelay = 500, retryLimit = 40 }
     throw new Error(`${lastError.message} The chat opened, but the draft was not added.`);
   }
 
-  // Sends to one chat with the same staged checks as Send both; the source chat is never touched.
-  async function deliver(sourceId, tabId, text, expect, { files = [], send = true } = {}) {
+  // One destination, one staged transaction, at most one native Send click.
+  async function deliver(sourceId, tabId, text, expect, { files = [], send = true, answer, verifyTarget } = {}) {
     const requestId = crypto.randomUUID();
     const payload = { requestId, text, source: false, attachments: files.length };
     try {
       for (let attempt = 1; ; attempt++) {
-        try { await ask(tabId, 'ASB_PREPARE', { ...payload, ...expect }); break; }
+        try { await ask(tabId, 'ASB_PREPARE', { ...payload, ...expect, ...(answer && { answer }) }); break; }
         catch (error) {
           // Only a pane that was just opened is worth waiting for.
           if (!expect || !error.retry || attempt >= retryLimit) throw error;
@@ -104,7 +110,8 @@ export function createBridge(api, manager, { retryDelay = 500, retryLimit = 40 }
       }
       await ask(tabId, 'ASB_STAGE', { ...payload, ...(files.length ? { files } : {}) });
       await ask(tabId, 'ASB_VALIDATE', payload);
-      chosen(await manager.context(sourceId), [tabId]);
+      if (verifyTarget) await verifyTarget();
+      else chosen(await manager.context(sourceId), [tabId]);
       if (!send) {
         await ask(tabId, 'ASB_KEEP', { requestId });
         return;
@@ -153,6 +160,146 @@ export function createBridge(api, manager, { retryDelay = 500, retryLimit = 40 }
     return { ok: true, message: `${name} is on the ${state.peer.side} with the draft ready. Review it, then send it there.` };
   }
 
+  async function comparisonPair(sourceId, { peerId, peerProvider }, menu) {
+    const state = await manager.context(sourceId);
+    if (!state.native || !state.peer) throw new Error(`Open two supported AI chats in Chrome Split View to use ${menu}.`);
+    if (state.peer.id !== peerId || (peerProvider && state.peer.provider !== peerProvider)) {
+      throw new Error(`The other pane changed. Open ${menu} again in the current split.`);
+    }
+    chosen(state, [peerId]);
+    const peer = await manager.supported(peerId);
+    if (peer.splitViewId !== state.source.splitViewId || peer.windowId !== state.source.windowId) {
+      throw new Error(`The split changed. Open ${menu} again.`);
+    }
+    return [state.source, peer].map((tab, index) => ({
+      id: tab.id, url: tab.url, split: tab.splitViewId, windowId: tab.windowId,
+      name: index ? state.peer.name : PROVIDERS[state.provider].name,
+      side: index ? state.peer.side : state.side,
+    }));
+  }
+
+  function reviewResults(pair, { read, reviewId }) {
+    return Promise.all(pair.map((chat, i) => ask(chat.id, 'ASB_REVIEW_RESULT', { peerId: pair[1 - i].id, read, ...(reviewId && { reviewId }) })));
+  }
+
+  async function compareStatus(sourceId, choice, menu = 'Compare') {
+    try {
+      const pair = await comparisonPair(sourceId, choice, menu);
+      const [statuses, reviews] = await Promise.all([
+        Promise.all(pair.map(chat => ask(chat.id, 'ASB_COMPARE_STATUS'))),
+        menu === 'Cross-review' ? reviewResults(pair, { read: false }) : [],
+      ]);
+      const pending = reviews.find(review => review.pending);
+      if (pending) return { ok: true, ready: false, message: pending.message || 'Send both review drafts and wait for both critiques to finish.' };
+      const unavailable = statuses.find(status => !status.ready || !status.turn);
+      if (unavailable) return { ok: true, ready: false, message: unavailable.message || `Wait for both assistants to finish, then open ${menu} again.` };
+      const turns = statuses.map(status => status.turn);
+      const status = { ok: true, ready: true, turns };
+      if (reviews.length && reviews[0].reviewId && reviews.every((review, i) =>
+        review.ready && review.reviewId === reviews[0].reviewId && review.turn === turns[i])) {
+        status.revision = { reviewId: reviews[0].reviewId, turns };
+      }
+      return status;
+    } catch (error) { return { ok: true, ready: false, message: error.message }; }
+  }
+
+  async function readAnswers(pair, turns, menu) {
+    const answers = await Promise.all(pair.map(chat => ask(chat.id, 'ASB_COMPARE_READ')));
+    for (const [i, answer] of answers.entries()) {
+      if (!answer.turn || answer.url !== pair[i].url || (turns && turns[i] !== answer.turn)) {
+        throw new Error(`An answer or conversation changed. Open ${menu} again.`);
+      }
+      if (typeof answer.text !== 'string' || !answer.text.trim()) throw new Error(`${pair[i].name} has no answer text to use.`);
+    }
+    return answers;
+  }
+
+  async function verifyAnswers(pair, choice, answers, menu) {
+    const current = await comparisonPair(pair[0].id, choice, menu);
+    if (current.some((chat, i) => chat.url !== pair[i].url || chat.split !== pair[i].split || chat.windowId !== pair[i].windowId || chat.side !== pair[i].side)) {
+      throw new Error(`The split changed. Open ${menu} again.`);
+    }
+    await Promise.all(pair.map((chat, i) => ask(chat.id, 'ASB_COMPARE_CHECK', answers[i])));
+  }
+
+  async function compare(sourceId, choice, settings) {
+    const pair = await comparisonPair(sourceId, choice, 'Compare');
+    const reviewer = pair.findIndex(chat => chat.id === choice.targetId);
+    if (reviewer < 0) throw new Error('Choose one of the two chats in this split to compare the answers.');
+    const answers = await readAnswers(pair, choice.turns, 'Compare');
+    const sections = pair.map((chat, i) => `${chat.name} (${chat.side} pane)\n${answers[i].text}`);
+    if (pair[0].side === 'right') sections.reverse();
+    const text = composeComparison(settings, { answers: sections.join('\n\n') });
+    if (text.length > 60000) throw new Error('The comparison exceeds 60,000 characters. Shorten your comparison instructions or share selected excerpts.');
+    const verifyTarget = () => verifyAnswers(pair, choice, answers, 'Compare');
+    const target = pair[reviewer];
+    const send = settings.shareMode === 'send';
+    await deliver(sourceId, target.id, text, undefined, { send, answer: answers[reviewer], verifyTarget });
+    return { ok: true, message: send ? `Comparison sent to ${target.name}.` : `Comparison draft added to ${target.name}. Review it, then send it there.` };
+  }
+
+  function requireReviewTurns(turns) {
+    if (!Array.isArray(turns) || turns.length !== 2 || !turns.every(turn => typeof turn === 'string' && turn)) {
+      throw new Error('Open Cross-review again to choose the current answers.');
+    }
+  }
+
+  async function crossReview(sourceId, choice, action, settings) {
+    if (typeof action !== 'string' || !Object.hasOwn(REVIEW_TEMPLATES, action)) throw new Error('Choose Critique, Find errors, or Suggest improvements.');
+    requireReviewTurns(choice.turns);
+    const pair = await comparisonPair(sourceId, choice, 'Cross-review');
+    const answers = await readAnswers(pair, choice.turns, 'Cross-review');
+    const reviewId = crypto.randomUUID();
+    const instructions = [settings.reviewGuidance, settings[REVIEW_TEMPLATES[action].key]]
+      .map(value => value.trim().replace(/\r\n?/g, '\n')).filter(Boolean).join('\n\n') + '\n\n';
+    const prompts = pair.map((_, i) => {
+      const peer = pair[1 - i];
+      const text = instructions + `Answer from ${peer.name} (${peer.side} pane)\n${answers[1 - i].text}`;
+      validateText(text);
+      return text;
+    });
+    const sendNow = settings.shareMode === 'send';
+    const result = await deliverMany({
+      ids: pair.map(chat => chat.id), labels: pair.map(chat => `${chat.name} (${chat.side} pane)`), requestId: reviewId, sendNow,
+      payload: (_id, type, i) => ({
+        requestId: reviewId, text: prompts[i], attachments: 0, source: false,
+        ...(type === 'ASB_PREPARE' && { answer: answers[i], review: { reviewId, peerId: pair[1 - i].id, quotedStart: instructions.length } }),
+      }),
+      verify: () => verifyAnswers(pair, choice, answers, 'Cross-review'),
+    });
+    if (!result.partial) result.message = sendNow
+      ? 'Cross-review sent to both chats. Each critique will appear in its own pane.'
+      : 'Review drafts are ready in both panes. Send each draft to receive its critique.';
+    return result;
+  }
+
+  async function revise(sourceId, choice, reviewId, settings) {
+    requireReviewTurns(choice.turns);
+    if (typeof reviewId !== 'string' || !reviewId || reviewId.length > 160) throw new Error('Open a completed Cross-review to revise an answer.');
+    const pair = await comparisonPair(sourceId, choice, 'Cross-review');
+    const i = pair.findIndex(chat => chat.id === choice.targetId);
+    if (i < 0) throw new Error('Choose the answer to revise in one of these two chats.');
+    const reviews = await reviewResults(pair, { read: true, reviewId });
+    if (reviews.some((review, index) => !review.ready || review.reviewId !== reviewId || review.turn !== choice.turns[index] ||
+      review.url !== pair[index].url || typeof review.text !== 'string' || !review.text.trim() ||
+      typeof review.original !== 'string' || !review.original.trim())) {
+      throw new Error('The two critiques for this review are no longer current. Open Cross-review again.');
+    }
+    const peer = pair[1 - i], target = pair[i];
+    const text = [
+      'Revise your original answer using the critique below. Draw on your own critique of the other answer where useful. Use your own judgment about which suggestions the evidence supports, correct any errors, and give a standalone revised answer.',
+      `Your original answer (${target.name}, ${target.side} pane)\n${reviews[i].original}`,
+      `Critique of your answer from ${peer.name} (${peer.side} pane)\n${reviews[1 - i].text}`,
+    ].join('\n\n');
+    validateText(text);
+    const snapshots = reviews.map(({ turn, url, text }) => ({ turn, url, text }));
+    const send = settings.shareMode === 'send';
+    await deliver(sourceId, target.id, text, undefined, {
+      send, answer: snapshots[i], verifyTarget: () => verifyAnswers(pair, choice, snapshots, 'Cross-review'),
+    });
+    return { ok: true, message: send ? `Revision requested from ${target.name}.` : `Revision draft added to ${target.name}.` };
+  }
+
   async function show(sourceId, { targetId, provider } = {}) {
     const state = await manager.context(sourceId);
     if (!state.peer) throw new Error('Put this chat in Split View to open another assistant beside it.');
@@ -160,7 +307,7 @@ export function createBridge(api, manager, { retryDelay = 500, retryLimit = 40 }
     return { ok: true, message };
   }
 
-  return { send, share, show, locked };
+  return { send, share, show, compare, compareStatus, crossReview, revise, locked };
 }
 
 function list(names) {

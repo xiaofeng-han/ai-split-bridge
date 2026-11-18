@@ -2,6 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import { JSDOM } from "jsdom";
+import { composeShare } from "../extension/settings.js";
 
 const adapterSource = await readFile(new URL("../extension/adapters.js", import.meta.url), "utf8");
 const contentSource = await readFile(new URL("../extension/content.js", import.meta.url), "utf8");
@@ -66,6 +67,100 @@ for (const provider of Object.keys(fixtures)) {
     assert.equal(fixture.clicks(), 1, "a duplicate commit must not click twice");
   });
 }
+
+test("a past ChatGPT prompt reaches Gemini when its native Send appears after staging", async t => {
+  const source = setup("chatgpt", { body: "<main><div data-message-author-role='user'>Compare the two outlines.</div></main>" });
+  const destination = setup("gemini", { body: `<main>
+    <model-response><button aria-label="Send message">Other action</button></model-response>
+    <input-area-v2><div class="text-input-field">${fixtures.gemini.editor}</div>
+      <div class="input-buttons-wrapper-bottom"><button class="send-button" aria-label="Dictate">Mic</button></div>
+    </input-area-v2></main>` });
+  t.after(source.close);
+  t.after(destination.close);
+  const sentPrompt = await source.adapter.readMessage(source.adapter.messageElements()[0].element);
+  assert.equal(sentPrompt.prompt, true);
+  const text = composeShare({}, { assistant: "ChatGPT", kind: "prompt", reply: sentPrompt.text });
+  const request = { requestId: "share-past-prompt", text };
+  const { adapter, window } = destination;
+  let submitted = [], micClicks = 0;
+  const row = window.document.querySelector(".input-buttons-wrapper-bottom");
+  row.firstElementChild.onclick = () => { micClicks++; };
+  adapter.preflight(request);
+  await adapter.stage(request);
+  const validated = adapter.validate(request);
+  const send = window.document.createElement("button");
+  send.disabled = true;
+  send.setAttribute("aria-labelledby", "submit-label");
+  send.innerHTML = '<span id="submit-label">Submit prompt (Enter)</span>';
+  send.onclick = () => { submitted.push(adapter.getDraft().text); };
+  row.append(send);
+  window.setTimeout(() => { send.disabled = false; }, 150);
+  await validated;
+  assert.equal(submitted.length, 0);
+  adapter.commit(request);
+  assert.deepEqual(submitted, [text]);
+  assert.equal(destination.clicks(), 0, "the button outside the current composer is never used");
+  assert.equal(micClicks, 0);
+});
+
+test("Gemini rechecks the site's current action at commit and refuses unrelated Send controls", async t => {
+  const f = setup("gemini", { body: `<aside><button aria-label="Send message"></button></aside>
+    <form>${fixtures.gemini.editor}<button data-test-id="send-button" aria-label="发送消息"></button>
+    <button aria-label="Send feedback"></button></form>` });
+  t.after(f.close);
+  const request = { requestId: "gemini-changed-action", text: "A message" };
+  f.adapter.preflight(request);
+  await f.adapter.stage(request);
+  await f.adapter.validate(request);
+  const action = f.window.document.querySelector("[data-test-id='send-button']");
+  action.setAttribute("aria-label", "Microphone");
+  let micClicks = 0;
+  action.onclick = () => { micClicks++; };
+  assert.throws(() => f.adapter.commit(request), /Cannot identify Gemini's Send button/);
+  assert.equal(micClicks, 0);
+  assert.equal(f.clicks(), 0);
+});
+
+test("Gemini accepts a localized submit tooltip with a keyboard hint after staging a shared prompt", async t => {
+  const f = setup("gemini", { body: `<input-area-v2>${fixtures.gemini.editor}
+    <button aria-label="语音输入"></button><button aria-label="发送提示（Enter）"></button>
+    </input-area-v2>` });
+  t.after(f.close);
+  const clicked = [];
+  for (const control of f.window.document.querySelectorAll("button")) {
+    control.onclick = () => clicked.push(control.getAttribute("aria-label"));
+  }
+  const request = { requestId: "localized-gemini", text: "Please check both examples." };
+  f.adapter.preflight(request);
+  await f.adapter.stage(request);
+  await f.adapter.validate(request);
+  f.adapter.commit(request);
+  assert.deepEqual(clicked, ["发送提示（Enter）"]);
+});
+
+test("Gemini finds a sibling action row in an unrecognized shell without reaching another form or the transcript", async t => {
+  const f = setup("gemini", { body: `<main><div class="conversation-page">
+    <model-response><button aria-label="Send"></button></model-response>
+    <div class="new-chat-shell"><div class="editing-surface">${fixtures.gemini.editor}</div>
+      <div class="action-row"><button id="actual-send" aria-label="Send message"></button></div>
+      <form><button aria-label="Send message"></button></form>
+    </div><button aria-label="Send message">Other action</button></div></main>` });
+  t.after(f.close);
+  const doc = f.window.document;
+  let clicks = 0;
+  doc.querySelector("#actual-send").onclick = () => { clicks++; };
+  const request = { requestId: "sibling-action", text: "Use the same outline" };
+  f.adapter.preflight(request);
+  await f.adapter.stage(request);
+  await f.adapter.validate(request);
+  const send = doc.querySelector("#actual-send");
+  send.hidden = true;
+  assert.throws(() => f.adapter.commit(request), /Cannot identify Gemini's Send button/);
+  send.hidden = false;
+  f.adapter.commit(request);
+  assert.equal(clicks, 1);
+  assert.equal(f.clicks(), 0);
+});
 
 test("nonempty destination, busy generation, and the destination's own attachments block staging", async (t) => {
   const fixture = setup();
@@ -654,7 +749,7 @@ const writing = {
     prompt: "<div data-testid='user-message'><p>Shared reply</p></div>", reply: "<div><div class='font-claude-response'><p>Still writ</p></div></div>",
   },
   gemini: { prompt: "<user-query><p>Shared reply</p></user-query>", reply: "<model-response><div class='model-response-text'><p>Still writ</p></div></model-response>" },
-  grok: { reply: "<div><div data-testid='assistant-message'><p>Still writ</p></div></div>" },
+  grok: { prompt: "<div data-testid='user-message'><p>Shared reply</p></div>", reply: "<div><div data-testid='assistant-message'><p>Still writ</p></div></div>" },
 };
 
 for (const [provider, turn] of Object.entries({ ...replyLayouts, claude: writing.claude.turn })) {
@@ -775,4 +870,240 @@ test("runtime interface returns errors and only accepts this extension's message
   const composer = fixture.window.document.querySelector("ai-split-bridge[data-ai-split-bridge='composer']");
   assert.equal(composer?.style.display ?? "none", "none", "no other chats means no extra button");
   assert.equal(fixture.clicks(), 0);
+});
+
+for (const provider of Object.keys(fixtures)) {
+  test(`${provider}: Compare reads the whole latest answer without copying files or highlighted excerpts`, t => {
+    const f = setup(provider);
+    t.after(f.close);
+    const { adapter, window } = f;
+    const last = adapter.messageElements().at(-1).element;
+    const selection = window.getSelection(), range = window.document.createRange();
+    const textNode = last.querySelector('p').firstChild;
+    range.setStart(textNode, 0);
+    range.setEnd(textNode, 3);
+    selection.addRange(range);
+    window.AISplitReplyFiles = { list: () => assert.fail('Compare should only read answer text') };
+    const status = adapter.compareStatus();
+    assert.equal(status.ready, true);
+    assert.equal('text' in status, false);
+    const answer = adapter.readCompareAnswer();
+    assert.equal(answer.turn, status.turn);
+    assert.ok(answer.text.includes(textNode.nodeValue));
+    assert.equal('files' in answer, false);
+    assert.equal(adapter.checkCompareAnswer(answer).ok, true);
+    last.querySelector('p').textContent = 'Different answer';
+    assert.throws(() => adapter.checkCompareAnswer(answer), /answer .* changed/);
+    const changed = adapter.readCompareAnswer();
+    assert.notEqual(changed.turn, status.turn, 'an in-place regeneration invalidates an open chooser');
+    last.replaceWith(last.cloneNode(true));
+    assert.throws(() => adapter.checkCompareAnswer(changed), /answer .* changed/);
+  });
+}
+
+test('Compare waits for a new reply or the end of streaming even with an older answer available', t => {
+  const f = setup('chatgpt');
+  t.after(f.close);
+  const { adapter, window } = f;
+  const last = adapter.messageElements().at(-1).element;
+  const newPrompt = window.document.createElement('div');
+  newPrompt.dataset.messageAuthorRole = 'user';
+  newPrompt.textContent = 'Next question';
+  last.after(newPrompt);
+  assert.equal(adapter.compareStatus().ready, false);
+  assert.throws(() => adapter.readCompareAnswer(), /latest prompt/);
+  const streaming = last.cloneNode(true);
+  newPrompt.after(streaming);
+  streaming.setAttribute('aria-busy', 'true');
+  assert.equal(adapter.compareStatus().ready, false);
+  streaming.setAttribute('aria-busy', 'false');
+  const stop = window.document.createElement('button');
+  stop.setAttribute('aria-label', 'Stop generating');
+  window.document.body.append(stop);
+  assert.throws(() => adapter.readCompareAnswer(), /still responding/);
+  stop.remove();
+  const snapshot = adapter.readCompareAnswer();
+  window.history.pushState({}, '', '/c/replaced');
+  assert.throws(() => adapter.checkCompareAnswer(snapshot), /changed/);
+});
+
+test('Compare preserves a reviewer draft and refuses a last-moment answer change', async t => {
+  const f = setup('gemini');
+  t.after(f.close);
+  const request = { requestId: 'compare-here', text: 'Compare these', answer: f.adapter.readCompareAnswer() };
+  f.setDraft('My edits');
+  assert.throws(() => f.adapter.preflight(request), /already has a draft/);
+  assert.equal(f.adapter.getDraft().text, 'My edits');
+  f.setDraft('');
+  f.adapter.preflight(request);
+  await f.adapter.stage(request);
+  await f.adapter.validate(request);
+  f.adapter.messageElements().at(-1).element.querySelector('p').textContent = 'Regenerated';
+  assert.throws(() => f.adapter.commit(request), /answer in Gemini changed/);
+  await f.adapter.cancel(request);
+  assert.equal(f.adapter.getDraft().text, '');
+  assert.equal(f.clicks(), 0);
+});
+
+test('Compare follows mixed Gemini and Grok renderers through the newest answer', t => {
+  const gemini = setup('gemini', { body: `<main>
+    <model-response><div class="model-response-text">Old answer</div></model-response>
+    <user-query>My latest question</user-query>
+    <model-response><details><summary>Show thinking</summary>Intermediate note</details>
+    <message-content><p>New answer</p></message-content><message-actions>Tool labels</message-actions></model-response></main>` });
+  const grok = setup('grok', { body: `<main>
+    <div data-testid="assistant-message">Old answer</div>
+    <div data-testid="user-message">My latest question</div>
+    <div class="message-bubble"><div class="response-content-markdown">New answer</div></div></main>` });
+  for (const page of [gemini, grok]) {
+    t.after(page.close);
+    assert.equal(page.adapter.readCompareAnswer().text, 'New answer');
+  }
+});
+
+for (const [index, provider] of Object.keys(fixtures).entries()) {
+  test(`${provider}: a cross-review identifies only the complete critique of its submitted request`, async t => {
+    const f = setup(provider);
+    t.after(f.close);
+    const { adapter, window } = f;
+    const form = window.document.querySelector('form');
+    const append = html => form.insertAdjacentHTML('beforebegin', html);
+    const read = { peerId: 73, read: true, reviewId: 'round-one' };
+    const original = adapter.readCompareAnswer();
+    const req = { requestId: 'review-send', text: 'Critically review:\n\nPeer answer', answer: original,
+      review: { peerId: 73, reviewId: read.reviewId } };
+    const draft = index % 2 === 1;
+    adapter.preflight(req);
+    await adapter.stage(req);
+    await adapter.validate(req);
+    assert.equal(adapter.reviewResult(read).ready, false, 'staging cannot start a round');
+    if (draft) adapter.keep(req); else adapter.commit(req);
+    assert.equal(adapter.reviewResult({ peerId: 73 }).pending, true);
+    assert.equal(f.clicks(), draft ? 0 : 1);
+    assert.equal(adapter.reviewResult({ peerId: 74 }).pending, undefined);
+    if (!draft) {
+      f.setDraft('');
+      assert.throws(() => adapter.preflight({ ...req, requestId: 'duplicate' }), /cross-review was already sent/);
+    }
+    f.setDraft('');
+    append(writing[provider].prompt.replace('Shared reply', 'Critically\u00a0 review:<br>Peer answer'));
+    const prompt = adapter.messageElements().at(-1).element;
+    prompt.setAttribute('data-asb-reading-collapsed', '');
+    assert.equal(adapter.reviewResult(read).pending, true, 'the folded prompt is still recognized');
+    append(writing[provider].reply.replace('Still writ', 'A claim needs verification.'));
+    const critique = adapter.messageElements().at(-1).element;
+    critique.setAttribute('aria-busy', 'true');
+    assert.equal(adapter.reviewResult(read).ready, false);
+    critique.setAttribute('aria-busy', 'false');
+    const status = adapter.reviewResult({ peerId: 73 });
+    assert.deepEqual(Object.keys(status).sort(), ['ok', 'ready', 'reviewId', 'turn']);
+    assert.equal(status.reviewId, 'round-one');
+    assert.equal(adapter.reviewResult({ ...read, reviewId: 'different' }).ready, false);
+    assert.equal(adapter.reviewResult({ peerId: 73, read: true }).ready, false);
+    const result = adapter.reviewResult(read);
+    assert.equal(result.turn, status.turn);
+    assert.equal(result.text, 'A claim needs verification.');
+    assert.equal(result.original, original.text);
+    assert.equal(result.url, window.location.href);
+    critique.querySelector('p').textContent = 'A regenerated critique.';
+    assert.notEqual(adapter.reviewResult(read).turn, status.turn);
+    append(writing[provider].prompt);
+    append(writing[provider].reply);
+    assert.equal(adapter.reviewResult(read).ready, false, 'a follow-up answer is not this critique');
+    append(writing[provider].prompt.replace('Shared reply', 'Critically review:<br>Peer answer'));
+    append(writing[provider].reply);
+    assert.equal(adapter.reviewResult(read).ready, false, 'repeating the same request later cannot rebind it');
+  });
+}
+
+test('an edited draft, cancelled review, or navigation cannot supply a critique', async t => {
+  const f = setup('gemini');
+  t.after(f.close);
+  const { adapter, window } = f;
+  const form = window.document.querySelector('form');
+  const review = { peerId: 2, reviewId: 'latest-round' };
+  const req = { requestId: 'review-a', text: 'Review this specific answer.', answer: adapter.readCompareAnswer(), review };
+  adapter.preflight(req);
+  await adapter.stage(req);
+  await adapter.cancel(req);
+  assert.equal(adapter.reviewResult(review).pending, undefined);
+  const next = { ...req, requestId: 'review-b' };
+  adapter.preflight(next);
+  await adapter.stage(next);
+  adapter.keep(next);
+  f.setDraft('');
+  assert.equal(adapter.reviewResult(review).pending, undefined, 'a discarded draft does not block retry');
+  const retry = { ...req, requestId: 'review-c', review: { ...review, reviewId: 'new-round' } };
+  adapter.preflight(retry);
+  await adapter.stage(retry);
+  adapter.keep(retry);
+  const append = html => form.insertAdjacentHTML('beforebegin', html);
+  append(writing.gemini.prompt.replace('Shared reply', 'Follow my edited instructions instead.'));
+  append(writing.gemini.reply);
+  assert.equal(adapter.reviewResult(retry.review).ready, false, 'an edited user turn cannot stand in for the review request');
+  window.history.pushState({}, '', '/app/different');
+  assert.equal(adapter.reviewResult(retry.review).ready, false);
+  window.history.replaceState({}, '', '/chat/test');
+  const p = adapter.messageElements().at(-2).element;
+  p.textContent = retry.text;
+  assert.equal(adapter.reviewResult(retry.review).ready, false, 'leaving the conversation discards the record');
+});
+
+test('a manually edited review keeps its quoted answer through native remounts and virtualization', async t => {
+  const f = setup('chatgpt');
+  t.after(f.close);
+  const { adapter, window } = f;
+  const document = window.document;
+  const editorForm = document.querySelector('form');
+  const original = adapter.messageElements().at(-1).element;
+  original.setAttribute('data-message-id', 'original-answer');
+  const quote = 'Answer from Claude (right pane)\nCheck the figures on page 8.';
+  const instruction = 'Find the errors.\n\n';
+  const review = { peerId: 3, reviewId: 'draft-round', quotedStart: instruction.length };
+  const request = { requestId: 'draft-review', text: instruction + quote, answer: adapter.readCompareAnswer(), review };
+  adapter.preflight(request);
+  await adapter.stage(request);
+  adapter.keep(request);
+  const edited = 'Recheck the figures. Show your work.\n\n' + quote;
+  f.setDraft(edited);
+  assert.equal(adapter.reviewResult(review).pending, true);
+  const remount = original.cloneNode(true);
+  original.replaceWith(remount);
+  assert.equal(adapter.reviewResult(review).pending, true, 'the original remount is recognized by ID and text');
+  f.setDraft('');
+  const user = document.createElement('div');
+  user.dataset.messageAuthorRole = 'user';
+  user.dataset.messageId = 'submitted-review-prompt';
+  user.textContent = edited;
+  editorForm.before(user);
+  // Only the page observer sees the submitted prompt with its original still mounted.
+  await new Promise(resolve => setImmediate(resolve));
+  remount.remove();
+  const remountedPrompt = user.cloneNode(true);
+  user.replaceWith(remountedPrompt);
+  editorForm.insertAdjacentHTML('beforebegin', writing.chatgpt.reply.replace('Still writ', 'The total is incorrect.'));
+  const result = adapter.reviewResult({ ...review, read: true });
+  assert.equal(result.ready, true, 'the bound native user turn survives both original and prompt remount');
+  assert.equal(result.original, request.answer.text);
+  assert.equal(result.text, 'The total is incorrect.');
+  remountedPrompt.textContent = 'A different request.\n' + quote;
+  assert.equal(adapter.reviewResult(review).ready, false, 'edits to an already submitted turn do not rebind it');
+});
+
+test('an edited peer quotation is not eligible for automatic revision', async t => {
+  const f = setup('chatgpt');
+  t.after(f.close);
+  const { adapter, window } = f;
+  const prefix = 'Critique this answer.\n\n';
+  const review = { peerId: 6, reviewId: 'edited-quote', quotedStart: prefix.length };
+  const req = { requestId: 'edited-quote-request', text: prefix + 'Answer from Claude (right pane)\nKeep this conclusion.',
+    answer: adapter.readCompareAnswer(), review };
+  adapter.preflight(req);
+  await adapter.stage(req);
+  adapter.keep(req);
+  f.setDraft('');
+  const form = window.document.querySelector('form');
+  form.insertAdjacentHTML('beforebegin', writing.chatgpt.prompt.replace('Shared reply', 'Check this. Answer from Claude (right pane) Change this conclusion.'));
+  form.insertAdjacentHTML('beforebegin', writing.chatgpt.reply);
+  assert.equal(adapter.reviewResult(review).ready, false);
 });

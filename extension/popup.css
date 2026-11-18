@@ -89,3 +89,8 @@ textarea:focus { outline: none; border-color: color-mix(in srgb, var(--fg) 35%, 
 
 footer { padding-top: 12px; border-top: 1px solid var(--line); color: var(--faint); font-size: 12px; line-height: 1.5; }
 footer b { color: var(--muted); font-weight: 500; }
+
+#reading-items { display: grid; gap: 2px; max-height: 148px; overflow-y: auto; }
+#reading-items button { overflow: hidden; padding: 6px 8px; border: 0; border-radius: 6px; background: transparent; text-align: left; text-overflow: ellipsis; white-space: nowrap; }
+#reading-items button:hover, #reading-items button:focus-visible { background: var(--hover); }
+#reading-detail:not(:empty), #reading-items:not(:empty), #reading-error:not(:empty) { margin-top: 5px; }

@@ -5,6 +5,10 @@
   globalThis.__aiSplitBridgeContentLoaded = true;
 
   const handlers = {
+    ASB_COMPARE_STATUS: () => adapter.compareStatus(),
+    ASB_COMPARE_READ: message => adapter.readCompareAnswer(message),
+    ASB_COMPARE_CHECK: message => adapter.checkCompareAnswer(message),
+    ASB_REVIEW_RESULT: message => adapter.reviewResult(message),
     ASB_READ_DRAFT: () => adapter.readPrompt(),
     ASB_PREPARE: message => adapter.preflight(message),
     ASB_STAGE: message => adapter.stage(message),
@@ -90,6 +94,14 @@
     .pill button:not(:disabled):hover,.share-button:hover { background:color-mix(in srgb,currentColor 8%,transparent); }
     .share-button { display:inline-flex; align-items:center; gap:6px; height:var(--size,32px); padding:0 10px 0 8px; border:0;
       border-radius:var(--radius,var(--share-radius)); background:transparent; color:var(--ink,inherit); font-size:13px; white-space:nowrap; }
+    .review-actions { display:inline-flex; align-items:center; }
+    .review-actions .cross-review { padding-inline-end:4px; }
+    .review-actions .review-options { padding:0 4px; }
+    .review-options .icon { width:14px; height:14px; transform:rotate(180deg); }
+    @media (max-width:640px) {
+      .root.share { flex-wrap:wrap; max-width:100%; }
+      .share-button { padding-inline:6px; }
+    }
 
     .menu,.toast { position:fixed; inset:auto; margin:0; border:var(--menu-border); background:var(--bg); color:var(--fg);
       box-shadow:var(--shadow); font-family:var(--font,system-ui,sans-serif); -webkit-font-smoothing:antialiased; }
@@ -309,13 +321,14 @@
   sendButton.append(icon('both'), sendText);
   const moreButton = button('more');
   moreButton.append(icon('chevron'));
-  moreButton.setAttribute('aria-label', 'Choose chats to send to');
+  moreButton.setAttribute('aria-label', 'Choose chats and conversation actions');
   moreButton.setAttribute('aria-haspopup', 'menu');
   pill.append(sendButton, moreButton);
   composer.root.append(pill);
   let composerFloating = false;
 
   function renderComposer(look) {
+    for (const trigger of [compareButton, quickReview, reviewOptions]) trigger.disabled = pending;
     const shown = !!context?.chats.length && composer.node.isConnected;
     composer.node.style.cssText = !shown ? 'display:none' : composerFloating
       ? 'display:inline-flex;position:fixed;right:20px;bottom:96px;z-index:2147483646' : 'display:inline-flex;align-items:center;flex:none';
@@ -390,7 +403,8 @@
     go.disabled = pending || !count;
     go.addEventListener('click', sendNow);
     footer.append(go);
-    if (!shares.size) {
+    // Gemini can expose action bars for older turns before the newest one has any controls.
+    if (!shares.size || adapter.provider === 'gemini') {
       const latest = button('link', 'Share this chat’s latest reply…');
       latest.addEventListener('click', async () => {
         let reply;
@@ -407,6 +421,12 @@
         try { renderMessagePicker(); } catch (error) { closeLayer(menu); toast(pill, error.message, true); }
       });
       footer.append(select);
+    }
+    for (const [action, title] of [['compare', 'Compare latest answers…'], ['cross-review', 'Cross-review…']]) {
+      const link = button(`link ${action}`, title);
+      link.disabled = pending;
+      link.addEventListener('click', () => renderPairMenu(action));
+      footer.append(link);
     }
     footer.append(el('p', 'hint', `${SHORTCUT} sends to the checked chats`));
     menu.append(footer);
@@ -435,6 +455,120 @@
     event.stopImmediatePropagation();
     sendNow();
   }, true);
+
+  // ---------- Work with the latest answers in this split ----------
+  function samePair(previous, page) {
+    return location.href === page && context.native && context.peer && previous.peer &&
+      context.peer.id === previous.peer.id && context.peer.provider === previous.peer.provider &&
+      context.side === previous.side && context.shareMode === previous.shareMode;
+  }
+  function pairButton(action, name, title, quick = false) {
+    const trigger = button(`share-button ${action}`, name);
+    trigger.title = title;
+    trigger.setAttribute('aria-label', title);
+    trigger.setAttribute('aria-haspopup', 'menu');
+    trigger.addEventListener('pointerdown', () => {
+      dismissedBy = isOpen(menu) && menuAnchor === trigger ? trigger : null;
+    });
+    trigger.addEventListener('click', () => {
+      if (pending) return;
+      const previous = { ...context }, page = location.href;
+      toggleMenu(trigger, () => renderPairMenu(action, quick && samePair(previous, page) ? 'quick' : 'choose'), false);
+    });
+    return trigger;
+  }
+  const compareButton = pairButton('compare', 'Compare', 'Compare the latest answers from both sides');
+  const quickReview = pairButton('cross-review', 'Cross-review', 'Cross-review both answers', true);
+  const reviewOptions = pairButton('cross-review', '', 'Choose a cross-review action or revise an answer');
+  reviewOptions.className = 'share-button review-options';
+  reviewOptions.append(icon('chevron'));
+  const reviewGroup = el('span', 'review-actions');
+  reviewGroup.append(quickReview, reviewOptions);
+
+  async function renderPairMenu(action, mode = 'choose') {
+    const crossReview = action === 'cross-review';
+    const name = crossReview ? 'Cross-review' : 'Compare';
+    const previous = { ...context };
+    const { selfId, side, peer, shareMode } = previous;
+    const page = location.href;
+    const heading = el('p', 'heading', `${name} latest answers`);
+    const note = el('p', 'hint');
+    note.setAttribute('role', 'status');
+    menu.replaceChildren(heading, note);
+    if (!context.native || !peer) {
+      note.textContent = `Open two AI chats in Chrome Split View to ${name.toLowerCase()} their answers.`;
+      place(menu, menuAnchor, menuAbove);
+      return;
+    }
+    note.textContent = 'Checking both chats for completed answers…';
+    place(menu, menuAnchor, menuAbove);
+    let status;
+    try { status = await request({ type: crossReview ? 'ASB_REVIEW_STATUS' : 'ASB_COMPARE_STATUS', peerId: peer.id }); }
+    catch (error) { status = { ready: false, message: error.message }; }
+    if (!note.isConnected || !isOpen(menu)) return;
+    if (!status.ready) {
+      note.textContent = status.message || 'Wait for a completed answer on each side.';
+      const retry = button('link', 'Check again');
+      retry.addEventListener('click', () => renderPairMenu(action));
+      menu.append(retry);
+      place(menu, menuAnchor, menuAbove);
+      return;
+    }
+
+    function submit(message) {
+      closeLayer(menu);
+      return run(menuAnchor, async () => {
+        await refresh();
+        if (!samePair(previous, page)) throw new Error(`The chats or sharing settings changed. Open ${name} again.`);
+        return request({ peerId: peer.id, peerProvider: peer.provider, expectedMode: shareMode, ...message });
+      });
+    }
+    function addChoice(title, detail, message) {
+      const row = button('row');
+      row.setAttribute('role', 'menuitem');
+      row.append(label(title, detail));
+      row.addEventListener('click', () => submit(message));
+      menu.insertBefore(row, note);
+    }
+    const revision = crossReview && status.revision;
+    if (crossReview && !revision && mode === 'quick') {
+      return submit({ type: 'ASB_CROSS_REVIEW', action: 'critique', turns: status.turns });
+    }
+    if (crossReview && (!revision || mode === 'again')) {
+      heading.textContent = 'How should the assistants review each other?';
+      for (const [action, title, detail] of [
+        ['critique', 'Critique', 'Assess the reasoning and evidence.'],
+        ['errors', 'Find errors', 'Look for mistakes and unsupported claims.'],
+        ['improvements', 'Suggest improvements', 'Recommend specific changes.'],
+      ]) {
+        addChoice(title, detail, { type: 'ASB_CROSS_REVIEW', action, turns: status.turns });
+      }
+      note.textContent = shareMode === 'draft'
+        ? 'Adds a review draft to each chat. Send both drafts to see the critiques side by side.'
+        : 'Sends each answer to the other chat. You can read both critiques side by side.';
+    } else {
+      const self = { id: selfId, side, name: adapter.name };
+      heading.textContent = revision ? 'Revise an answer' : 'Who should compare the two latest answers?';
+      for (const chat of (side === 'left' ? [self, peer] : [peer, self])) {
+        const message = revision ? { type: 'ASB_REVISE', reviewId: revision.reviewId, turns: revision.turns }
+          : { type: 'ASB_COMPARE', turns: status.turns };
+        addChoice(chat.name, where(chat), { ...message, targetId: chat.id });
+      }
+      if (revision) {
+        note.textContent = shareMode === 'draft'
+          ? 'Both critiques are ready. Choose a chat to draft a revision request using the other assistant’s critique.'
+          : 'Both critiques are ready. Choose a chat to revise its original answer using the other assistant’s critique.';
+        const again = button('link', 'Cross-review the latest replies again…');
+        again.addEventListener('click', () => renderPairMenu(action, 'again'));
+        menu.append(again);
+      } else {
+        note.textContent = shareMode === 'draft'
+          ? 'Choosing a reviewer adds an editable comparison prompt to that chat.'
+          : 'Choosing a reviewer sends both answers to that chat for comparison.';
+      }
+    }
+    place(menu, menuAnchor, menuAbove);
+  }
 
   // ---------- Share a reply ----------
   const shares = new Map();
@@ -574,6 +708,7 @@
   function canShare() {
     return !!context && (context.chats.length > 0 || (!!context.peer && context.closed.length > 0));
   }
+  let narrowPane = innerWidth <= 640;
 
   // ---------- Keep controls beside the sites' own buttons ----------
   function mountComposer(look) {
@@ -596,24 +731,44 @@
   function mountShares(look) {
     const seen = new Set();
     const shown = canShare();
-    const anchors = [...adapter.replyAnchors().map(anchor => ({ ...anchor, prompt: false })),
+    const replies = adapter.replyAnchors();
+    const anchors = [...replies.map(anchor => ({ ...anchor, prompt: false })),
       ...(adapter.promptAnchors?.() || []).map(anchor => ({ ...anchor, prompt: true }))];
     for (const { parent, before, response, prompt } of anchors) {
       const views = prompt ? prompts : shares;
       let view = views.get(response);
       if (!view) views.set(response, view = shareHost(response, prompt));
       seen.add(view);
-      if (view.node.parentNode !== parent || view.node.nextSibling !== before) parent.insertBefore(view.node, before);
+      // Keep long native action rows usable in narrow split panes. The extension's
+      // buttons can wrap on their own line directly beneath the answer text.
+      const ownLine = !prompt && narrowPane;
+      const container = ownLine ? response : parent;
+      const next = ownLine ? null : before;
+      if (view.node.parentNode !== container || view.node.nextSibling !== next) container.insertBefore(view.node, next);
       borrow(view.root, parent.querySelector('button'), [24, 44], '32px');
-      view.node.style.cssText = shown ? 'display:inline-flex;align-items:center;flex:none' : 'display:none';
+      view.node.style.cssText = !shown ? 'display:none' : ownLine
+        ? 'display:flex;max-width:100%;align-items:center' : 'display:inline-flex;align-items:center;flex:none';
       paint(view.root, look);
     }
     for (const views of [shares, prompts]) for (const [response, view] of views) {
       if (!seen.has(view)) { view.node.remove(); views.delete(response); }
     }
+    const latest = shares.get(replies.at(-1)?.response);
+    const ready = latest && context.native && context.peer && !adapter.busy?.();
+    quickReview.title = context.shareMode === 'draft'
+      ? 'Draft a critique request in both chats, or choose an answer to revise after both critiques are ready.'
+      : 'Send each answer to the other chat for critique, or choose an answer to revise after both critiques are ready.';
+    quickReview.setAttribute('aria-description', quickReview.title);
+    for (const control of [compareButton, reviewGroup]) {
+      if (ready) {
+        if (control.parentNode !== latest.root) latest.root.append(control);
+      } else control.remove();
+    }
   }
 
+  if (globalThis.AISplitReading) globalThis.AISplitReading.notify = text => toast(composer.node, text, true);
   function scan() {
+    globalThis.AISplitReading?.refresh();
     if (!context) return;
     const look = appearance();
     mountComposer(look);
@@ -627,7 +782,13 @@
   addEventListener('scroll', () => {
     if (isOpen(menu) && menuAnchor) requestAnimationFrame(() => place(menu, menuAnchor, menuAbove));
   }, { capture: true, passive: true });
-  addEventListener('resize', () => closeLayer(menu));
+  addEventListener('resize', () => {
+    closeLayer(menu);
+    if (narrowPane !== (innerWidth <= 640)) {
+      narrowPane = innerWidth <= 640;
+      scan();
+    }
+  });
 
   refresh().catch(() => {});
 })();

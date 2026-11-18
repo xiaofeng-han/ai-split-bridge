@@ -32,7 +32,14 @@ function setup(t, context = split()) {
   let listener;
   const model = {
     context,
-    respond(message) { return message.type === 'ASB_CONTEXT' ? this.context : { ok: true, message: 'Done.' }; },
+    compareStatus: { ok: true, ready: true, turns: ['local-turn', 'peer-turn'] },
+    reviewStatus: { ok: true, ready: true, turns: ['local-turn', 'peer-turn'] },
+    respond(message) {
+      if (message.type === 'ASB_CONTEXT') return this.context;
+      if (message.type === 'ASB_COMPARE_STATUS') return this.compareStatus;
+      if (message.type === 'ASB_REVIEW_STATUS') return this.reviewStatus;
+      return { ok: true, message: 'Done.' };
+    },
   };
   const adapter = {
     provider: 'chatgpt', name: 'ChatGPT',
@@ -203,6 +210,223 @@ test('without Copy buttons the chooser can still share the latest reply', async 
   await view.click(view.row('Claude'));
   assert.equal(view.sent('ASB_SHARE')[0].reply, 'Second answer.');
   assert.equal(view.sent('ASB_SHARE')[0].targetId, 2);
+});
+
+test('Gemini keeps Share latest in its composer menu even if only an older toolbar is present', async t => {
+  const view = setup(t);
+  view.adapter.provider = 'gemini';
+  view.adapter.name = 'Gemini';
+  const anchors = view.adapter.replyAnchors;
+  view.adapter.replyAnchors = () => anchors().slice(0, 1);
+  await view.refresh();
+  assert.equal(view.hosts('share').length, 1);
+  await view.click(view.pill().querySelector('.more'));
+  const latest = [...view.menu.querySelectorAll('button')].find(node => node.textContent === 'Share this chat’s latest reply…');
+  await view.click(latest);
+  await view.click(view.row('Claude'));
+  assert.deepEqual(view.sent('ASB_SHARE'), [{ type: 'ASB_SHARE', targetId: 2, reply: 'Second answer.' }]);
+});
+
+test('Compare beside the latest reply lets either split side review only after an explicit choice', async t => {
+  const view = setup(t);
+  const compare = () => view.hosts('share').at(-1).shadowRoot.querySelector('.compare');
+  await settle();
+  assert.equal(view.hosts('share')[0].shadowRoot.querySelector('.compare'), null);
+  assert.equal(view.sent('ASB_COMPARE_STATUS').length, 0, 'ordinary chatting makes no readiness requests');
+  for (const [name, id, mode] of [['Claude', 2, 'draft'], ['ChatGPT', 1, 'send']]) {
+    view.model.context.shareMode = mode;
+    await view.click(compare());
+    assert.deepEqual(view.sent('ASB_COMPARE_STATUS').at(-1), { type: 'ASB_COMPARE_STATUS', peerId: 2 });
+    assert.match(view.menu.textContent, /ChatGPTLeft side/);
+    assert.match(view.menu.textContent, /ClaudeRight side/);
+    assert.equal(view.row('Gemini'), undefined, 'a hidden tab cannot be chosen as reviewer');
+    assert.match(view.menu.querySelector('.hint').textContent, mode === 'draft' ? /editable.*prompt/ : /sends both answers/);
+    assert.equal(view.sent('ASB_COMPARE').length, mode === 'draft' ? 0 : 1);
+    await view.click(view.row(name));
+    assert.deepEqual(view.sent('ASB_COMPARE').at(-1), {
+      type: 'ASB_COMPARE', targetId: id, peerId: 2, peerProvider: 'claude', turns: ['local-turn', 'peer-turn'], expectedMode: mode,
+    });
+  }
+});
+
+test('Compare explains waiting and unpaired states, and can recheck without sending', async t => {
+  const view = setup(t);
+  view.adapter.replyAnchors = () => [];
+  await view.refresh();
+  await view.click(view.pill().querySelector('.more'));
+  view.model.compareStatus = { ok: true, ready: false, message: 'Claude is still responding.' };
+  await view.click(view.menu.querySelector('.compare'));
+  assert.match(view.menu.textContent, /Claude is still responding/);
+  assert.equal(view.menu.querySelector('button.row'), null);
+  view.model.compareStatus = { ok: true, ready: false, message: 'ChatGPT has no completed answer yet.' };
+  await view.click(view.menu.querySelector('.link'));
+  assert.match(view.menu.textContent, /no completed answer/);
+  view.model.compareStatus = { ok: true, ready: true, turns: ['answer1', 'answer2'] };
+  await view.click(view.menu.querySelector('.link'));
+  assert.ok(view.row('Claude'));
+  await view.click(view.pill().querySelector('.more'));
+  view.model.context = { ...split(), native: false, side: null, peer: null };
+  await view.click(view.pill().querySelector('.more'));
+  await view.click(view.menu.querySelector('.compare'));
+  assert.match(view.menu.textContent, /Open two AI chats in Chrome Split View/);
+  assert.equal(view.sent('ASB_COMPARE_STATUS').length, 3);
+  assert.equal(view.sent('ASB_COMPARE').length, 0);
+});
+
+test('changing a split side or conversation leaves an open comparison unsubmitted', async t => {
+  const view = setup(t);
+  await settle();
+  const compare = view.hosts('share').at(-1).shadowRoot.querySelector('.compare');
+  await view.click(compare);
+  view.model.context = { ...split(), peer: { ...split().peer, provider: 'gemini', name: 'Gemini' } };
+  await view.click(view.row('Claude'));
+  assert.match(view.toast.textContent, /changed.*Open Compare/);
+  view.model.context = split();
+  await view.click(compare);
+  view.dom.window.history.pushState({}, '', '/c/different');
+  await view.click(view.row('ChatGPT'));
+  assert.match(view.toast.textContent, /changed.*Open Compare/);
+  assert.equal(view.sent('ASB_COMPARE').length, 0);
+});
+
+test('Cross-review offers all three review actions and submits only the selected workflow', async t => {
+  const view = setup(t);
+  await settle();
+  assert.equal(view.hosts('share')[0].shadowRoot.querySelector('.cross-review'), null);
+  assert.equal(view.sent('ASB_REVIEW_STATUS').length, 0);
+  for (const [label, action, mode] of [
+    ['Critique', 'critique', 'send'], ['Find errors', 'errors', 'draft'], ['Suggest improvements', 'improvements', 'send'],
+  ]) {
+    view.model.context.shareMode = mode;
+    const count = view.sent('ASB_CROSS_REVIEW').length;
+    await view.click(view.hosts('share').at(-1).shadowRoot.querySelector('.review-options'));
+    assert.deepEqual(view.sent('ASB_REVIEW_STATUS').at(-1), { type: 'ASB_REVIEW_STATUS', peerId: 2 });
+    assert.equal(view.sent('ASB_CROSS_REVIEW').length, count, 'opening the menu transfers nothing');
+    assert.match(view.menu.querySelector('.hint').textContent, mode === 'send' ? /Sends each answer/ : /draft to each chat/);
+    assert.equal(view.row('Claude'), undefined, 'revision is unavailable before the two critiques arrive');
+    await view.click(view.row(label));
+    assert.equal(view.menu.hidden, true);
+    assert.deepEqual(view.sent('ASB_CROSS_REVIEW').at(-1), {
+      type: 'ASB_CROSS_REVIEW', peerId: 2, peerProvider: 'claude', expectedMode: mode,
+      turns: ['local-turn', 'peer-turn'], action,
+    });
+  }
+  assert.equal(view.sent('ASB_REVISE').length, 0);
+});
+
+test('both matching critiques unlock a revision in the chosen split pane', async t => {
+  const view = setup(t);
+  view.adapter.replyAnchors = () => [];
+  view.model.reviewStatus = { ok: true, ready: false, message: 'Waiting for the other critique.' };
+  await view.refresh();
+  await view.click(view.pill().querySelector('.more'));
+  await view.click(view.menu.querySelector('.cross-review'));
+  assert.match(view.menu.textContent, /Waiting for the other critique/);
+  assert.equal(view.menu.querySelector('button.row'), null);
+  const revision = { reviewId: 'session-1', turns: ['critique1', 'critique2'] };
+  view.model.reviewStatus = { ok: true, ready: true, turns: ['latest1', 'latest2'], revision };
+  await view.click(view.menu.querySelector('.link'));
+  assert.equal(view.menu.querySelector('.heading').textContent, 'Revise an answer');
+  assert.deepEqual([...view.menu.querySelectorAll('.row .name')].map(node => node.textContent), ['ChatGPT', 'Claude']);
+  assert.equal(view.sent('ASB_REVISE').length, 0);
+  // Switch to a repeat review deliberately; opening the menu never starts a round.
+  await view.click(view.menu.querySelector('.link'));
+  assert.ok(view.row('Critique'));
+  assert.equal(view.sent('ASB_CROSS_REVIEW').length, 0);
+  await view.click(view.pill().querySelector('.more'));
+
+  for (const [name, targetId, mode] of [['ChatGPT', 1, 'send'], ['Claude', 2, 'draft']]) {
+    view.model.context.shareMode = mode;
+    await view.click(view.pill().querySelector('.more'));
+    await view.click(view.menu.querySelector('.cross-review'));
+    assert.match(view.menu.querySelector('.hint').textContent, mode === 'send' ? /revise its original answer/ : /draft a revision request/);
+    await view.click(view.row(name));
+    assert.deepEqual(view.sent('ASB_REVISE').at(-1), {
+      type: 'ASB_REVISE', reviewId: revision.reviewId, turns: revision.turns,
+      peerId: 2, peerProvider: 'claude', targetId, expectedMode: mode,
+    });
+  }
+});
+
+test('the primary Cross-review button requests one mutual critique in one click', async t => {
+  const view = setup(t, { ...split(), shareMode: 'draft' });
+  await settle();
+  const primary = view.hosts('share').at(-1).shadowRoot.querySelector('.cross-review');
+  assert.match(primary.title, /Draft a critique request in both chats/);
+  let finish;
+  const respond = view.model.respond.bind(view.model);
+  view.model.respond = msg => msg.type === 'ASB_CROSS_REVIEW' ? new Promise(resolve => { finish = resolve; }) : respond(msg);
+  await view.click(primary);
+  assert.equal(primary.disabled, true);
+  await view.click(primary);
+  assert.deepEqual(view.sent('ASB_CROSS_REVIEW'), [{
+    type: 'ASB_CROSS_REVIEW', action: 'critique', turns: ['local-turn', 'peer-turn'],
+    peerId: 2, peerProvider: 'claude', expectedMode: 'draft',
+  }]);
+  finish({ ok: true, message: 'Drafts ready.' }); await settle();
+  assert.equal(primary.disabled, false);
+  view.model.reviewStatus.revision = { reviewId: 'completed-review', turns: ['c1', 'c2'] };
+  await view.click(primary);
+  assert.equal(view.menu.querySelector('.heading').textContent, 'Revise an answer');
+  assert.equal(view.sent('ASB_REVISE').length, 0);
+  assert.equal(view.sent('ASB_CROSS_REVIEW').length, 1);
+});
+
+test('a quick critique checks changed draft settings and pending answers before submission', async t => {
+  const view = setup(t, { ...split(), shareMode: 'draft' });
+  await settle();
+  const primary = view.hosts('share').at(-1).shadowRoot.querySelector('.cross-review');
+  view.model.context = { ...split(), shareMode: 'send' };
+  await view.click(primary);
+  assert.ok(view.row('Critique'), 'a mode change between paint and click needs a fresh choice');
+  assert.equal(view.sent('ASB_CROSS_REVIEW').length, 0);
+  await view.click(primary);
+  view.model.reviewStatus = { ok: true, ready: false, message: 'Claude is still writing.' };
+  await view.click(primary);
+  assert.match(view.menu.textContent, /Claude is still writing/);
+  assert.equal(view.sent('ASB_CROSS_REVIEW').length, 0);
+});
+
+test('reply controls use their own line in a narrow pane and move back when widened', async t => {
+  const view = setup(t);
+  await settle();
+  const host = view.hosts('share').at(-1);
+  const bar = host.parentElement;
+  for (const width of [390, 1000]) {
+    view.dom.window.innerWidth = width;
+    view.dom.window.dispatchEvent(new view.dom.window.Event('resize'));
+    await settle();
+    assert.equal(host.parentElement, width === 390 ? bar.closest('article') : bar);
+    assert.ok(host.shadowRoot.querySelector('.cross-review'));
+    assert.equal(view.hosts('share').length, 2);
+  }
+});
+
+test('changed split, mode or conversation prevents stale cross-review and revision choices', async t => {
+  const view = setup(t);
+  await settle();
+  const trigger = view.hosts('share').at(-1).shadowRoot.querySelector('.review-options');
+  await view.click(trigger);
+  view.model.context = { ...split(), peer: { ...split().peer, id: 5 } };
+  await view.click(view.row('Find errors'));
+  assert.match(view.toast.textContent, /changed.*Open Cross-review/);
+  assert.equal(view.sent('ASB_CROSS_REVIEW').length, 0);
+  view.model.context = { ...split(), shareMode: 'draft' };
+  view.model.reviewStatus.revision = { reviewId: 'r', turns: ['c1', 'c2'] };
+  await view.click(trigger);
+  view.model.context.shareMode = 'send';
+  await view.click(view.row('Claude'));
+  assert.match(view.toast.textContent, /changed.*Open Cross-review/);
+  await view.click(trigger);
+  view.dom.window.history.pushState({}, '', '/c/different');
+  await view.click(view.row('ChatGPT'));
+  assert.equal(view.sent('ASB_REVISE').length, 0);
+  view.model.context = { ...split(), native: false, peer: null, side: null };
+  await view.click(view.pill().querySelector('.more'));
+  const calls = view.sent('ASB_REVIEW_STATUS').length;
+  await view.click(view.menu.querySelector('.cross-review'));
+  assert.match(view.menu.textContent, /Open two AI chats in Chrome Split View/);
+  assert.equal(view.sent('ASB_REVIEW_STATUS').length, calls);
 });
 
 test('the shortcut sends from the site composer only, and pending work blocks a second send', async t => {

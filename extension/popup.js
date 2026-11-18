@@ -1,4 +1,4 @@
-import { DEFAULT_SHARE_MESSAGE, DEFAULT_PROMPT_MESSAGE, DEFAULT_CONVERSATION_MESSAGE, loadSettings, saveSettings } from './settings.js';
+import { DEFAULT_SHARE_MESSAGE, DEFAULT_PROMPT_MESSAGE, DEFAULT_CONVERSATION_MESSAGE, DEFAULT_COMPARISON_MESSAGE, REVIEW_TEMPLATES, loadSettings, saveSettings } from './settings.js';
 
 const $ = selector => document.querySelector(selector);
 const status = $('#status');
@@ -64,18 +64,35 @@ const templates = {
   reply: { key: 'shareMessage', default: DEFAULT_SHARE_MESSAGE, label: 'Message with the shared reply', placeholder: '{reply}' },
   prompt: { key: 'promptMessage', default: DEFAULT_PROMPT_MESSAGE, label: 'Message with your prompt', placeholder: '{content}' },
   conversation: { key: 'conversationMessage', default: DEFAULT_CONVERSATION_MESSAGE, label: 'Message with selected messages', placeholder: '{content}' },
+  comparison: { key: 'comparisonMessage', default: DEFAULT_COMPARISON_MESSAGE, label: 'Comparison instructions', placeholder: '{answers}' },
+  reviewCommon: { key: 'reviewGuidance', default: '', label: 'Instructions for all cross-reviews' },
+  ...REVIEW_TEMPLATES,
 };
 const current = () => templates[kind.value];
 const count = () => { $('#count').textContent = `${message.value.length.toLocaleString()} / ${message.maxLength.toLocaleString()}`; };
 const describeMode = () => {
-  $('#mode-detail').textContent = sendNow.checked ? 'Shared messages are sent to the chat you pick.' : 'Shared messages are added as drafts for you to review first.';
+  $('#mode-detail').textContent = sendNow.checked ? 'Send shared messages, comparisons and cross-reviews immediately.' : 'Add shared messages, comparisons and cross-reviews as drafts.';
 };
 let settings, saveTimer = null, revision = 0, saveQueue = Promise.resolve();
 function showMessage() {
   const template = current();
   message.value = settings[template.key]?.trim() ? settings[template.key] : template.default;
-  $('#message-label').textContent = template.label;
-  $('#content-placeholder').textContent = $('#content-placeholder').dataset.insert = template.placeholder;
+  const reviewing = !template.placeholder;
+  $('#message-label').textContent = template.label || 'Cross-review instructions';
+  const common = kind.value === 'reviewCommon';
+  message.placeholder = common ? 'For example, cite evidence for each criticism.' : '';
+  $('#template-hint').textContent = common ? 'Included in both chats for all three review modes.'
+    : reviewing ? 'The other assistant’s answer is added below these instructions.' : 'Insert';
+  if (reviewing) message.setAttribute('aria-describedby', 'template-hint');
+  else message.removeAttribute('aria-describedby');
+  const comparing = kind.value === 'comparison';
+  $('#assistant-placeholder').hidden = comparing || reviewing;
+  const insert = $('#content-placeholder');
+  insert.hidden = reviewing;
+  if (!reviewing) {
+    insert.textContent = insert.dataset.insert = template.placeholder;
+    insert.title = comparing ? 'Insert both labelled answers here. If omitted, they go at the end.' : 'The shared text. Without it, the text goes at the end';
+  }
   count();
 }
 function save() {

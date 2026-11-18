@@ -69,6 +69,22 @@ Use `tests/fixtures/bridge-test-a.pdf` and `bridge-test-b.pdf`; both contain syn
 4. Repeat in draft mode and with a nonempty destination. Draft mode must leave the shared context unsent; an existing destination draft must be preserved. Past prompt attachments are not copied by message selection; attach those files again in the current composer if needed.
 5. In the popup, choose **Message for → Selected messages**. Replace “Please continue from this context” with a distinctive instruction, keeping `{content}`. Share several messages and confirm the instruction and full transcript arrive. Repeat with **My prompts**. Quickly switch between types and change **Send right away** while editing: each message must keep its own saved text. Reopen the popup to check persistence; **Reset** must affect only the chosen type.
 
+## Compare answers
+
+1. Put two supported chats in a native split and get a completed answer in each. Turn off **Send right away**, open **Compare** beside the latest reply and choose the left chat. Confirm its editable draft contains both complete answers, their pane labels and a request for evidence behind shared claims.
+2. Clear that draft, enable **Send right away** and use **Compare latest answers…** in the composer menu. Choose the right chat and confirm only that chat submits once.
+3. Open Compare while the other chat is generating, then check again when it finishes. Try changing a reply after the reviewer menu opens and try targeting an existing draft. Check that the extension explains what changed and preserves the draft.
+4. In **Sharing → Message for → Compare**, save a custom instruction with `{answers}` in the middle. Reopen the popup, compare into a draft and check that both labelled answers appear in that position. Remove the placeholder and repeat to check that the answers appear at the end. **Reset** should restore just the comparison instructions.
+5. In a Chinese Gemini chat, open **Share with…** under both a previous prompt and an answer. In draft mode, confirm the selected content appears in the destination with the correct speaker. If the reply toolbar is still loading, use **Share this chat’s latest reply…** from the composer menu.
+
+## Cross-review
+
+1. Start with different, completed answers in the two panes of a native split. Click **Cross-review** once. Check that each assistant receives the original answer from the opposite pane once. Read both critiques in their original chats.
+2. When only one critique is complete, check the menu. Once both are complete, reopen **Cross-review** and choose one assistant under **Revise an answer**. Verify that only the chosen chat gets a revision request containing its own original and the other assistant’s critique of it.
+3. Repeat with **Find errors** or **Suggest improvements** and **Send right away** off. Both composers should contain editable drafts. Change the instructions in one, keep the labelled answer intact, send both with the native controls, wait for both replies and choose a revision. Check that the revision stays a draft.
+4. Try with an existing draft on one side, change panes while the menu is open, or ask an unrelated follow-up before requesting revision. Existing drafts should survive, and a revision should only use critiques from the same review round.
+5. Under **Sharing → Message for → Cross-review**, set **All review modes** to “Use Chinese and cite the claim you are reviewing.” Give **Find errors** a separate instruction. Reopen the popup and start a **Find errors** review in draft mode. Both drafts should contain the shared guidance, the custom error checks and the opposite side’s labelled answer. Reset **Find errors**, then clear **All review modes** and check that **Compare** keeps its own template.
+
 ## Share generated files
 
 Test a mixed Claude reply containing one large Markdown artifact card, two compact Markdown rows, a DRAWIO file, and a ZIP. The share menu should list all five. The large artifact should export through its own viewer’s **More options → Download as MD**, and the four compact rows should use their individual downloads. **Download all** must not be used. Check that an already-open viewer is preserved or restored and that changing the viewer during capture does not get undone. Use destinations that accept the included file types; a rejected upload must stop submission.

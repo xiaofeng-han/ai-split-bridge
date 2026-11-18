@@ -14,7 +14,7 @@
       send: ["button[data-testid='send-button']", "button[aria-label='Send prompt']", "button[aria-label='Send message']", "button[data-composer-submit]:not([aria-label^='Stop'])", "button[aria-label='Send']"],
       stop: ["button[data-testid='stop-button']", "button[aria-label='Stop generating']", "button[aria-label='Stop streaming']", "button[aria-label='Stop']"],
       voice: ["button[data-testid='composer-speech-button']", "button[aria-label^='Start voice' i]", "button[aria-label^='Start dictation' i]", "button[aria-label^='Dictate' i]", "button[data-start-dictation]"],
-      responses: ["[data-markdown-text-style='assistant-message']", "[data-message-role='assistant'] [data-assistant-markdown-root]", "[data-message-author-role='assistant'] .markdown", "[data-message-author-role='assistant']"],
+      responses: ["[data-markdown-text-style='assistant-message']", "[data-assistant-markdown-root]", "[data-message-author-role='assistant'] .markdown", "[data-message-author-role='assistant']", "[data-message-role='assistant']", "[data-content-search-unit-key$=':assistant']", "[data-turn='assistant']"],
       prompts: ["[data-message-author-role='user']", "[data-message-role='user']", "[data-content-search-unit-key$=':user']"],
       ignore: ["[data-d-component='badge']"],
     },
@@ -32,8 +32,8 @@
       name: "Gemini",
       hosts: ["gemini.google.com"],
       editors: ["rich-textarea .ql-editor[contenteditable='true']", "rich-textarea [contenteditable='true']", ".ql-editor[contenteditable='true']"],
-      send: ["button.send-button", "button[aria-label='Send message']", "button[aria-label='Send']"],
-      stop: ["button.stop-button", "button[aria-label='Stop response']", "button[aria-label='Stop generating']"],
+      send: ["button.send-button", "button[data-test-id='send-button']", "button[aria-label='Send message' i]", "button[aria-label='Send' i]", "button[aria-label='Submit prompt' i]"],
+      stop: ["button.stop-button", "button[data-test-id='stop-button']", "button[aria-label='Stop response' i]", "button[aria-label='Stop generating' i]", "button[aria-label='Stop' i]", "button[aria-label='停止回答']", "button[aria-label='停止回复']", "button[aria-label='停止生成']"],
       voice: ["button[aria-label^='Dictate']", "button[aria-label='Microphone']"],
       group: [".input-buttons-wrapper-bottom"],
       responses: ["model-response .model-response-text", "model-response message-content", "model-response .markdown-main-panel"],
@@ -64,6 +64,19 @@
   const config = providers[provider];
   const transactions = new Map();
   const finished = new Map();
+  let lastReview = null;
+  let reviewObserver = null;
+  function clearReview() {
+    reviewObserver?.disconnect();
+    reviewObserver = null;
+    lastReview = null;
+  }
+  const forgetDepartedReview = () => {
+    if (lastReview && location.href !== lastReview.answer.url) clearReview();
+  };
+  globalThis.navigation?.addEventListener("currententrychange", forgetDepartedReview);
+  addEventListener("popstate", forgetDepartedReview);
+  addEventListener("pagehide", clearReview);
   const TRANSACTION_TTL = 60_000;
   const FINISHED_TTL = 5 * 60_000;
   const MAX_TEXT_LENGTH = 60_000;
@@ -424,11 +437,47 @@
     return Math.max(added().length, attachmentCount(transaction.editor) - transaction.attachmentsBefore);
   }
 
-  function sendButton(editor) {
+  // Gemini can put the action row outside the text field and switch the trailing
+  // action from a microphone to Send after the editor processes a paste.
+  function geminiSendButton(editor) {
+    const pageBoundary = "main, body, html, [role='main'], [role='log'], nav, aside, [role='navigation']";
+    const controlOwner = "form, input-area-v2, input-area, .composer, [data-testid='composer'], aside, nav, [role='dialog'], [role='search'], [role='region'], [role='complementary']";
+    const sendName = /^(?:(?:send|submit)(?: (?:message|prompt|query))?(?: to Gemini)?|(?:发送|發送|傳送|提交)(?:消息|訊息|提示(?:詞|词)?)?)\s*(?:[（(][^()（）]+[)）])?$/i;
+    for (let root = editor.parentElement, depth = 0; root && depth < 10; root = root.parentElement, depth++) {
+      if (root.matches(pageBoundary) || root.querySelector("model-response, user-query, [role='log']")) break;
+      const otherEditor = [...root.querySelectorAll("[contenteditable='true']")]
+        .some(other => other !== editor && !editor.contains(other) && !other.contains(editor) && visible(other));
+      if (otherEditor) break;
+      const candidates = [...root.querySelectorAll("button, [role='button']")].filter(button => {
+        const owner = button.closest(controlOwner);
+        if ((owner && !owner.contains(editor)) || editor.contains(button)
+          || button.closest("[data-ai-split-bridge], [role='menu'], [aria-hidden='true']")) return false;
+        // A shared send/stop slot may retain its CSS class after changing actions.
+        // Prefer the current accessible name whenever the page provides one.
+        const labelledBy = (button.getAttribute("aria-labelledby") || "").split(/\s+/)
+          .map(id => id && document.getElementById(id)?.textContent).filter(Boolean).join(" ");
+        const name = normalize(labelledBy || button.getAttribute("aria-label") || button.title || button.getAttribute("mattooltip"));
+        const isSend = name ? sendName.test(name)
+          : sendName.test(normalize(button.textContent)) || button.matches("button.send-button, [data-test-id='send-button'], [data-testid='send-button']")
+            || !!button.querySelector("[data-mat-icon-name='send'], [fonticon='send']");
+        return isSend && visible(button);
+      });
+      if (candidates.length > 1) throw new Error("Gemini has multiple Send buttons in this composer. Open one conversation and try again.");
+      if (candidates.length) return candidates[0];
+      if (root.matches("form, input-area-v2, .composer, [data-testid='composer'], [role='dialog']")) break;
+    }
+    return null;
+  }
+
+  function sendButton(editor, waitForRender = false) {
     const scope = composerRoot(editor);
-    const button = firstMatch(config.send, scope) || firstMatch(config.send);
-    if (!button) throw new Error(`Cannot identify ${config.name}'s Send button. Nothing was sent from this tab.`);
+    const button = provider === "gemini" ? geminiSendButton(editor) : firstMatch(config.send, scope) || firstMatch(config.send);
+    if (!button) {
+      if (waitForRender) return null;
+      throw new Error(`Cannot identify ${config.name}'s Send button. Nothing was sent from this tab.`);
+    }
     if (button.disabled || button.getAttribute("aria-disabled") === "true" || button.closest("[inert]")) {
+      if (waitForRender) return null;
       throw new Error(`${config.name}'s Send button is not ready. Nothing was sent from this tab.`);
     }
     return button;
@@ -508,8 +557,19 @@
     }
   }
 
-  function preflight({ requestId: id, text, source = false, attachments = 0, provider: expected, notPage }) {
+  function preflight({ requestId: id, text, source = false, attachments = 0, provider: expected, notPage, answer, review }) {
     assertExpectedPage(expected, notPage);
+    const originalTurn = answer && checkedAnswerElement(answer);
+    if (review !== undefined) {
+      if (!answer || source || attachments || !Number.isSafeInteger(review?.peerId) || review.peerId < 0) {
+        throw new Error("Invalid cross-review request.");
+      }
+      requestId(review.reviewId);
+      if (lastReview?.sent && lastReview.answer.url === location.href && lastReview.answer.text === answer.text &&
+          sameReviewSource(lastReview, originalTurn)) {
+        throw new Error(`A cross-review was already sent to ${config.name} for this answer. Check the chat before starting another.`);
+      }
+    }
     prune();
     requestId(id);
     if (transactions.has(id) || finished.has(id)) throw new Error("This request was already handled. Check both chats before trying again.");
@@ -525,7 +585,7 @@
     if (!source) assertNoAttachments(editor);
     // Send stays disabled while the site uploads attachments; validation waits for it.
     if (source && !attached) sendButton(editor);
-    transactions.set(id, { editor, text, original, source, attachments, sourceAttachments: source ? attached : 0, files: [], url: location.href, state: "prepared", expires: Date.now() + TRANSACTION_TTL + (attached ? 90_000 : 0) });
+    transactions.set(id, { editor, text, original, source, answer, review, reviewSource: review && reviewTurnKey(originalTurn), attachments, sourceAttachments: source ? attached : 0, files: [], url: location.href, state: "prepared", expires: Date.now() + TRANSACTION_TTL + (attached ? 90_000 : 0) });
     return { ok: true };
   }
 
@@ -567,6 +627,11 @@
         assertUploadsAccepted(transaction.editor);
         try { return !!ready(transaction); } catch { return false; }
       }, 60_000, 250);
+    } else if (provider === "gemini") {
+      await until(() => {
+        assertUnchanged(transaction, transaction.text);
+        return !!sendButton(transaction.editor, true);
+      }, 4000);
     }
     ready(transaction);
     // Other chats may still be uploading; keep this one's request alive until they are ready too.
@@ -576,20 +641,25 @@
 
   function commit({ requestId: id }) {
     const transaction = transactionFor(id);
+    if (transaction.answer) checkCompareAnswer(transaction.answer);
     const button = ready(transaction);
     // A click can synchronously navigate or throw after reaching a page handler.
     // Remember the attempt before clicking and never retry it automatically.
     transactions.delete(id);
     finished.set(id, Date.now());
     button.click();
+    rememberReview(transaction, true);
     return { ok: true, status: "clicked" };
   }
 
   // Release a verified shared draft without clicking Send or rolling back its files.
   function keep({ requestId: id }) {
-    ready(transactionFor(id));
+    const transaction = transactionFor(id);
+    if (transaction.answer) checkCompareAnswer(transaction.answer);
+    ready(transaction);
     transactions.delete(id);
     finished.set(id, Date.now());
+    rememberReview(transaction, false);
     return { ok: true };
   }
 
@@ -645,13 +715,15 @@
   }
 
   function rawResponses() {
-    // Claude mixes labelled blocks with unlabelled Markdown siblings in one reply.
-    const selectors = provider === "claude" ? [config.responses.join(", ")] : config.responses;
-    for (const selector of selectors) {
-      const found = [...document.querySelectorAll(selector)].filter(visible);
-      if (found.length) return found.filter(node => !found.some(other => other !== node && other.contains(node)));
-    }
-    return [];
+    // Different renderers can coexist in a conversation. Collect every turn in DOM order.
+    const found = [...document.querySelectorAll(config.responses.join(", "))].filter(node => {
+      if (provider !== "chatgpt") return visible(node);
+      if (node.closest("aside, nav, [role='dialog'], [role='complementary'], [data-testid='chat-side-pane'], [contenteditable='true']")) return false;
+      // A display:contents wrapper has no box of its own even when its text is visible.
+      return visible(node) || (getComputedStyle(node).display === "contents"
+        && [...node.querySelectorAll("*")].some(visible));
+    });
+    return found.filter(node => !found.some(other => other !== node && other.contains(node)));
   }
 
   function promptElements() {
@@ -674,9 +746,14 @@
 
   // Claude can render several Markdown blocks and file cards before one action bar.
   // Stop at a user turn, composer, or a second action bar so neighbouring replies never merge.
-  function replyScope(element, raw = rawResponses(), bars = actionBars(raw)) {
+  function replyScope(element, raw, bars) {
     const semantic = element.closest("[data-chatgpt-selection-message-id], [data-message-author-role='assistant'], [data-message-role='assistant'], [data-testid='assistant-message'], model-response");
+    if (provider === "chatgpt") {
+      return semantic || element.closest("[data-content-search-unit-key$=':assistant'], [data-turn='assistant']") || element;
+    }
     if (provider !== "claude") return semantic || element;
+    raw ??= rawResponses();
+    bars ??= actionBars(raw);
     let grouped = semantic || element;
     for (let node = element, depth = 0; node && node !== document.body && node.tagName !== "MAIN" && depth < 8; node = node.parentElement, depth++) {
       if (node.querySelector(config.prompts.join(", ")) || node.querySelector("[contenteditable='true'], textarea")) break;
@@ -694,7 +771,7 @@
   }
 
   function replyBody(element, raw = rawResponses()) {
-    if (provider !== "claude") return responseText(element);
+    if (provider !== "claude" && provider !== "gemini") return responseText(element);
     const blocks = raw.filter(node => node === element || element.contains(node));
     return blocks.length ? blocks.map(responseText).filter(Boolean).join("\n\n") : responseText(element);
   }
@@ -734,6 +811,154 @@
 
   function latestReply() {
     return responseElements().at(-1) || replyAnchors().at(-1)?.response || null;
+  }
+
+  // Read only the latest turn's rendered answer, independent of text selection and file controls.
+  const compareTurns = new WeakMap();
+  function currentAnswer() {
+    const raw = rawResponses();
+    const latest = messageElements({ raw, withReplyTools: true }).at(-1);
+    const answer = completedAnswer(latest, raw);
+    return { answer, element: latest.element };
+  }
+  const compareAnswer = () => currentAnswer().answer;
+
+  function completedAnswer(latest, raw) {
+    assertIdle();
+    if (latest?.role !== "assistant") {
+      throw new Error(`Wait for an answer to the latest prompt in ${config.name}, then open Compare again.`);
+    }
+    const element = latest.element;
+    const streaming = "[data-is-streaming='true'], [data-is-loading='true'], [aria-busy='true']";
+    if (element.closest(streaming) || element.querySelector(streaming)) throw new Error(`${config.name} is still responding. Wait for it to finish.`);
+    const text = replyBody(element, raw);
+    if (!text) throw new Error(`${config.name}'s latest answer has no text to compare.`);
+    if (text.length > MAX_TEXT_LENGTH) throw new Error(`${config.name}'s latest answer exceeds the 60,000-character comparison limit.`);
+    let identity = compareTurns.get(element);
+    if (identity?.url !== location.href || identity.text !== text) {
+      identity = { turn: crypto.randomUUID(), url: location.href, text };
+      compareTurns.set(element, identity);
+    }
+    return { ok: true, ...identity };
+  }
+
+  function reviewTurnKey(element) {
+    const attributes = ['data-message-id', 'data-chatgpt-selection-message-id', 'data-turn-key', 'data-content-search-unit-key', 'data-turn-id', 'data-response-id'];
+    const selector = attributes.map(key => `[${key}]`).join(',');
+    const marker = element.closest(selector) || element.querySelector(selector);
+    if (marker) {
+      const key = attributes.find(attribute => marker.getAttribute(attribute));
+      if (key) return key + '/' + marker.getAttribute(key);
+    }
+    return element.closest('.conversation-container[id]')?.id || null;
+  }
+
+  const oneLine = value => normalize(value).replace(/\s+/g, " ");
+  const sameReviewSource = (record, element) => compareTurns.get(element)?.turn === record.answer.turn ||
+    !!record.sourceKey && record.sourceKey === reviewTurnKey(element);
+  function matchesReviewRequest(record, text) {
+    if (record.prompt) return text === record.prompt.text;
+    if (text === record.request) return true;
+    // In draft mode the user can edit their instructions around the complete labelled peer answer.
+    return !record.sent && !!record.quote && (` ${text} `).includes(` ${record.quote} `);
+  }
+
+  function bindReviewPrompt(record, turns, raw) {
+    const end = turns.length - (turns.at(-1)?.role === "assistant" ? 2 : 1);
+    const prompt = turns[end];
+    if (prompt?.role !== "user") return false;
+    const element = prompt.element;
+    const body = provider === "gemini" ? element.querySelector(".query-content") || element : element;
+    const text = oneLine(responseText(body));
+    if (!matchesReviewRequest(record, text)) return false;
+    if (record.prompt) {
+      const bound = record.prompt.node.deref();
+      if (bound === element) return true;
+      if (bound?.isConnected || !record.prompt.key || record.prompt.key !== reviewTurnKey(element)) return false;
+      record.prompt.node = new WeakRef(element);
+      return true;
+    }
+    const previous = turns[end - 1];
+    if (previous?.role !== "assistant") return false;
+    if (!sameReviewSource(record, previous.element) || replyBody(previous.element, raw) !== record.answer.text) return false;
+    record.prompt = { node: new WeakRef(element), key: reviewTurnKey(element), text };
+    record.sent = true;
+    reviewObserver?.disconnect();
+    reviewObserver = null;
+    return true;
+  }
+
+  function rememberReview(transaction, sent) {
+    if (!transaction.review || location.href !== transaction.url) return;
+    clearReview();
+    const { reviewId, peerId, quotedStart } = transaction.review;
+    const quote = Number.isSafeInteger(quotedStart) && quotedStart > 0 && quotedStart < transaction.text.length
+      ? oneLine(transaction.text.slice(quotedStart)) : '';
+    const record = { reviewId, peerId, answer: transaction.answer, sourceKey: transaction.reviewSource,
+      request: oneLine(transaction.text), sent, quote, prompt: null };
+    lastReview = record;
+    const bind = () => {
+      forgetDepartedReview();
+      if (lastReview !== record) return;
+      const raw = rawResponses();
+      bindReviewPrompt(record, messageElements({ raw, withReplyTools: true }), raw);
+    };
+    // Bind when the native user turn appears, while long virtualized chats still have the original in view.
+    // Ignore assistant token streaming and disconnect as soon as the request has a verified turn.
+    const selector = [...config.prompts, ...(provider === 'grok' ? ['.message-bubble'] : [])].join(',');
+    reviewObserver = new MutationObserver(changes => {
+      for (const change of changes) {
+        const target = change.target.nodeType === Node.ELEMENT_NODE ? change.target : change.target.parentElement;
+        if (target?.closest(selector) || [...change.addedNodes].some(node => node.nodeType === Node.ELEMENT_NODE &&
+          (node.matches(selector) || node.querySelector(selector)))) { bind(); break; }
+      }
+    });
+    reviewObserver.observe(document.body, { childList: true, subtree: true, characterData: true });
+    bind();
+  }
+
+  // Only an answer directly following this round's own submitted request is a critique.
+  // Whitespace can change when the site renders a draft as message paragraphs.
+  function reviewResult({ peerId, read = false, reviewId }) {
+    forgetDepartedReview();
+    const record = lastReview;
+    const unavailable = { ok: true, ready: false };
+    if (!record || record.peerId !== peerId || ((read || reviewId !== undefined) && record.reviewId !== reviewId)) return unavailable;
+    const raw = rawResponses();
+    const turns = messageElements({ raw, withReplyTools: true });
+    const latest = turns.at(-1);
+    if (!latest) return unavailable;
+    const originalStillLatest = latest.role === "assistant" && sameReviewSource(record, latest.element);
+    if (originalStillLatest && replyBody(latest.element, raw) === record.answer.text) {
+      if (record.sent) return { ...unavailable, pending: true, message: `Waiting for ${config.name} to answer the cross-review request.` };
+      const editor = firstMatch(config.editors);
+      return editor && matchesReviewRequest(record, oneLine(readEditor(editor)))
+        ? { ...unavailable, pending: true, message: `Send the cross-review draft in ${config.name} to get its critique.` } : unavailable;
+    }
+    if (!bindReviewPrompt(record, turns, raw)) return unavailable;
+    if (latest.role === "user") return { ...unavailable, pending: true, message: `Waiting for ${config.name}'s critique.` };
+    let answer;
+    try { answer = completedAnswer(latest, raw); }
+    catch (error) { return { ...unavailable, pending: true, message: error.message }; }
+    const result = { ok: true, ready: true, reviewId: record.reviewId, turn: answer.turn };
+    return read ? { ...result, url: answer.url, text: answer.text, original: record.answer.text } : result;
+  }
+
+  function compareStatus() {
+    try { return { ok: true, ready: true, turn: compareAnswer().turn }; }
+    catch (error) { return { ok: true, ready: false, message: error.message }; }
+  }
+
+  function checkedAnswerElement(snapshot) {
+    const { answer: current, element } = currentAnswer();
+    if (snapshot.turn !== current.turn || snapshot.url !== current.url || snapshot.text !== current.text) {
+      throw new Error(`The answer in ${config.name} changed. Open Compare again to use the current answers.`);
+    }
+    return element;
+  }
+  function checkCompareAnswer(snapshot) {
+    checkedAnswerElement(snapshot);
+    return { ok: true };
   }
 
   function getResponse() {
@@ -786,6 +1011,7 @@
 
   const actionLabel = (button) => normalize(button.getAttribute("aria-label") || button.title || "");
   const isCopy = (button) => button.matches(copySelectors)
+    || (provider === "gemini" && !!button.closest("message-actions copy-button"))
     || (/^copy\b/i.test(actionLabel(button)) && !/\b(code|prompt|link|table|image)\b/i.test(actionLabel(button)));
   const isAction = (button) => isCopy(button) || REPLY_ACTION.test(actionLabel(button)) || MORE_ACTION.test(actionLabel(button));
 
@@ -793,10 +1019,15 @@
   function actionBars(known) {
     const bars = new Set();
     for (const button of document.querySelectorAll("button")) {
-      if (!REPLY_ACTION.test(actionLabel(button)) || button.closest("pre, [contenteditable='true']") || !laidOut(button)) continue;
+      if (!REPLY_ACTION.test(actionLabel(button)) || button.closest("pre, [contenteditable='true'], [aria-hidden='true']") || !laidOut(button)) continue;
       for (let node = button.parentElement, depth = 0; node && node !== document.body && depth < 5; node = node.parentElement, depth++) {
         if (known.some((response) => node.contains(response))) break;
-        if ([...node.querySelectorAll("button")].filter(isAction).length > 1) {
+        const buttons = [...node.querySelectorAll("button")];
+        // An inline writing block has its own Copy and occasionally Read aloud.
+        // Its editor actions belong to the document inside the assistant reply.
+        if (provider === "chatgpt" && buttons.some(control =>
+          /^(?:open editor|save as page)$/i.test(actionLabel(control) || normalize(control.textContent)))) break;
+        if (buttons.filter(isAction).length > 1) {
           bars.add(node);
           break;
         }
@@ -809,13 +1040,20 @@
   function replyFor(bar, bars, known) {
     const owner = known.find((response) => response.contains(bar));
     if (owner) return owner;
+    const turn = provider === "chatgpt"
+      ? bar.closest("[data-talvt-turn-state], [data-turn-id], [data-testid^='conversation-turn-'], article")
+      : null;
+    const local = turn ? known.filter(response => turn.contains(response)) : known;
     let child = bar;
-    for (let node = bar.parentElement, depth = 0; node && node !== document.body && depth < 8; child = node, node = node.parentElement, depth++) {
+    for (let node = bar.parentElement, depth = 0; node && node !== document.body && node !== turn?.parentElement && depth < 8; child = node, node = node.parentElement, depth++) {
       if (bars.some((other) => other !== bar && node.contains(other))) return null;
-      const earlier = known.filter((response) => node.contains(response) && (response.compareDocumentPosition(bar) & Node.DOCUMENT_POSITION_FOLLOWING));
+      const earlier = local.filter((response) => node.contains(response) && (response.compareDocumentPosition(bar) & Node.DOCUMENT_POSITION_FOLLOWING));
       if (earlier.length) return earlier.at(-1);
-      if (known.length) continue;
+      if (local.length) continue;
       for (let sibling = child.previousElementSibling; sibling; sibling = sibling.previousElementSibling) {
+        // A shared turn can contain a user prompt, its reply, then reply actions.
+        // An empty reply must never assign these actions to that earlier prompt.
+        if (provider === "chatgpt" && (sibling.matches(config.prompts.join(", ")) || sibling.querySelector(config.prompts.join(", ")))) return null;
         if (!ours(sibling) && visible(sibling) && normalize(sibling.textContent)) return sibling;
       }
     }
@@ -836,8 +1074,16 @@
     return { parent: bar, before: more ? slot(more) : null };
   }
 
-  function replyAnchors() {
-    const known = responseElements();
+  function replyAnchors(known = responseElements()) {
+    if (provider === "gemini") {
+      return known.map(response => {
+        const actions = response.querySelector("message-actions");
+        const bar = actions?.querySelector(".buttons-container-v2, .buttons-container") || actions;
+        // Compact layouts may defer the native toolbar. Keep sharing on this turn.
+        const place = bar && laidOut(bar) ? placeInBar(bar) : { parent: response, before: null };
+        return { ...place, response };
+      });
+    }
     const bars = actionBars(known);
     const anchors = new Map();
     for (const bar of bars) {
@@ -850,6 +1096,19 @@
   function promptAnchors() {
     const prompts = promptElements(), replies = responseElements(), anchors = [];
     for (const response of prompts) {
+      if (provider === "gemini") {
+        const copy = response.querySelector("[data-test-id='prompt-copy-button']");
+        const row = copy?.closest(".luminous-actions-container") || copy?.parentElement;
+        if (row && laidOut(row)) {
+          const slot = slotFor(copy, row);
+          let before = slot.nextElementSibling;
+          while (before && ours(before)) before = before.nextElementSibling;
+          anchors.push({ parent: row, before, response });
+        } else {
+          anchors.push({ parent: response, before: null, response });
+        }
+        continue;
+      }
       for (let scope = response, depth = 0; scope && scope !== document.body && depth < 5; scope = scope.parentElement, depth++) {
         if (prompts.some(other => other !== response && scope.contains(other)) || replies.some(reply => scope.contains(reply))) break;
         const copy = [...scope.querySelectorAll("button")].find(button => laidOut(button)
@@ -864,14 +1123,31 @@
     return anchors;
   }
 
+  function messageElements({ raw = rawResponses(), withReplyTools = false } = {}) {
+    const replies = responseElements(raw);
+    const prompts = promptElements();
+    const entries = new Map(replies.map(element => [element, { element, role: "assistant" }]));
+    // ChatGPT can put Copy/Rate/Read aloud outside the Markdown container.
+    // Reuse the same native reply-to-toolbar association as Share with….
+    if (withReplyTools && provider === "chatgpt") {
+      for (const { response, parent } of replyAnchors(replies)) {
+        if (prompts.some(prompt => prompt.contains(response) || response.contains(prompt))) continue;
+        entries.set(response, { element: response, role: "assistant", toolbar: parent });
+      }
+    }
+    return [
+      ...prompts.map(element => ({ element, role: "user" })),
+      ...entries.values(),
+    ].sort((a, b) =>
+      a.element.compareDocumentPosition(b.element) & Node.DOCUMENT_POSITION_FOLLOWING ? -1 : 1);
+  }
+
   function messages() {
     const raw = rawResponses();
-    const entries = [
-      ...promptElements().map(element => ({ element, role: "user", text: responseText(element) })),
-      ...responseElements(raw).map(element => ({ element, role: "assistant", text: replyBody(element, raw), files: globalThis.AISplitReplyFiles?.list(element) || [] })),
-    ];
-    return entries.filter(entry => entry.text || entry.files?.length).sort((a, b) =>
-      a.element.compareDocumentPosition(b.element) & Node.DOCUMENT_POSITION_FOLLOWING ? -1 : 1);
+    return messageElements({ raw }).map(({element, role}) => role === "user"
+      ? { element, role, text: responseText(element) }
+      : { element, role, text: replyBody(element, raw), files: globalThis.AISplitReplyFiles?.list(element) || [] }
+    ).filter(entry => entry.text || entry.files?.length);
   }
 
   async function readMessage(element) {
@@ -937,7 +1213,8 @@
     getDraft: () => ({ ok: true, text: readEditor(getEditor()) }),
     readPrompt, canLeave, preflight, stage, validate, commit, keep, cancel, insert, getResponse, replyText,
     readReplyFiles: files => globalThis.AISplitReplyFiles.read(files),
-    readReply, messages, readMessage, readMessages, promptAnchors,
+    readReply, messageElements, messages, readMessage, readMessages, promptAnchors,
+    compareStatus, readCompareAnswer: compareAnswer, checkCompareAnswer, reviewResult,
     readResponse: async () => { getResponse(); return readReply(latestReply()); },
     composerAnchor, replyAnchors, ownsEditor, styleSource, busy,
   });

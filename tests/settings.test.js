@@ -1,12 +1,28 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { composeShare, DEFAULT_SHARE_MESSAGE, DEFAULT_PROMPT_MESSAGE, DEFAULT_CONVERSATION_MESSAGE, loadSettings, MAX_SHARE_MESSAGE, readSettings, saveSettings } from '../extension/settings.js';
+import { composeShare, composeComparison, DEFAULT_SHARE_MESSAGE, DEFAULT_PROMPT_MESSAGE, DEFAULT_CONVERSATION_MESSAGE, DEFAULT_COMPARISON_MESSAGE, REVIEW_TEMPLATES, loadSettings, MAX_SHARE_MESSAGE, readSettings, saveSettings } from '../extension/settings.js';
 
-const defaults = { shareMode: 'send', shareMessage: DEFAULT_SHARE_MESSAGE, promptMessage: DEFAULT_PROMPT_MESSAGE, conversationMessage: DEFAULT_CONVERSATION_MESSAGE };
+const defaults = {
+  shareMode: 'send', shareMessage: DEFAULT_SHARE_MESSAGE, promptMessage: DEFAULT_PROMPT_MESSAGE,
+  conversationMessage: DEFAULT_CONVERSATION_MESSAGE, comparisonMessage: DEFAULT_COMPARISON_MESSAGE,
+  reviewGuidance: '', critiqueMessage: REVIEW_TEMPLATES.critique.default, errorsMessage: REVIEW_TEMPLATES.errors.default,
+  improvementsMessage: REVIEW_TEMPLATES.improvements.default,
+};
 
 const memory = (initial = {}) => {
   const data = structuredClone(initial);
-  return { data, async get(key) { return key in data ? { [key]: structuredClone(data[key]) } : {}; }, async set(value) { Object.assign(data, structuredClone(value)); } };
+  return {
+    data,
+    async get(key) { return key == null ? structuredClone(data) : key in data ? { [key]: structuredClone(data[key]) } : {}; },
+    async set(value) {
+      const stored = structuredClone(value);
+      for (const [key, item] of Object.entries(value)) {
+        assert.ok(Buffer.byteLength(key + JSON.stringify(item)) <= 8192);
+        stored[key] = typeof item === 'string' ? Buffer.from(item, 'utf8').toString('utf8') : stored[key];
+      }
+      Object.assign(data, stored);
+    },
+  };
 };
 
 test('by default a shared reply is sent right away inside the standard message', async () => {
@@ -14,6 +30,41 @@ test('by default a shared reply is sent right away inside the standard message',
   assert.deepEqual(settings, defaults);
   assert.equal(composeShare(settings.shareMessage, { assistant: 'Grok', reply: 'Hi there.' }),
     "Here is Grok's reply:\n\nHi there.\n\nWhat do you think? Please review it critically. Point out anything wrong, weak, or missing.\n\nIf there are good ideas, use them to improve your previous response. Do not just agree with it—use your own judgement.");
+});
+
+test('existing profiles can customize and reset Compare independently of Replies', async () => {
+  const storage = memory({ settings: { shareMode: 'draft', shareMessage: 'Review this carefully: {reply}' } });
+  const answers = 'Claude (left pane)\nUse {answers} literally. $&\n\nGemini (right pane)\nCheck {assistant}.';
+  assert.match(composeComparison(await loadSettings(storage), { answers }), /Agreement is not proof of correctness/);
+  await saveSettings(storage, { comparisonMessage: '先看这两份回答：\n{answers}\n哪些主张需要核实？' });
+  assert.equal(composeComparison(await loadSettings(storage), { answers }), `先看这两份回答：\n${answers}\n哪些主张需要核实？`);
+  assert.equal(composeComparison({ comparisonMessage: 'Check the evidence.' }, { answers }), 'Check the evidence.\n\n' + answers);
+  await saveSettings(storage, { comparisonMessage: '   ' });
+  assert.deepEqual(await loadSettings(storage), { ...defaults, shareMode: 'draft', shareMessage: 'Review this carefully: {reply}' });
+});
+
+test('full-length multilingual sharing and cross-review instructions survive sync item limits and later edits', async () => {
+  const storage = memory();
+  const settings = { ...defaults, shareMode: 'draft' };
+  for (const key of ['shareMessage', 'promptMessage', 'conversationMessage', 'comparisonMessage', 'reviewGuidance', 'critiqueMessage', 'errorsMessage', 'improvementsMessage']) {
+    settings[key] = ('答'.repeat(999) + '👋' + key + '\n').repeat(4).slice(0, MAX_SHARE_MESSAGE);
+    await saveSettings(storage, { [key]: settings[key], shareMode: 'draft' });
+  }
+  assert.deepEqual(await loadSettings(storage), settings);
+  await saveSettings(storage, { comparisonMessage: 'Check assumptions.' });
+  assert.deepEqual(await loadSettings(storage), { ...settings, comparisonMessage: 'Check assumptions.' });
+  assert.deepEqual((await saveSettings(storage, { comparisonMessage: '' })).comparisonMessage, DEFAULT_COMPARISON_MESSAGE);
+});
+
+test('profiles with templates split by v0.10.0 gain independent review defaults', async () => {
+  const storage = memory({ settings: { splitTemplates: true, shareMode: 'draft' }, 'comparisonMessage.0': 'Compare prior work: {answers}' });
+  const old = await loadSettings(storage);
+  assert.deepEqual(old, { ...defaults, shareMode: 'draft', comparisonMessage: 'Compare prior work: {answers}' });
+  await saveSettings(storage, { reviewGuidance: '先检查证据。', errorsMessage: '逐项核对数字。' });
+  const updated = await loadSettings(storage);
+  assert.deepEqual(updated, { ...old, reviewGuidance: '先检查证据。', errorsMessage: '逐项核对数字。' });
+  await saveSettings(storage, { reviewGuidance: '   ' });
+  assert.deepEqual(await loadSettings(storage), { ...old, errorsMessage: '逐项核对数字。' });
 });
 
 test('your own message wraps the reply, and without {reply} the reply goes at the end', () => {

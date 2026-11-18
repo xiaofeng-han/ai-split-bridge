@@ -26,10 +26,23 @@ async function handle(message, sender) {
       const { source: unused, ...context } = await manager.context(source.id);
       return { ...context, shareMode: (await loadSettings(chrome.storage.sync)).shareMode };
     }
+    const compareChoice = { peerId: message.peerId, peerProvider: message.peerProvider, targetId: message.targetId, turns: message.turns };
+    if (message.type === 'ASB_COMPARE_STATUS') return bridge.compareStatus(source.id, compareChoice);
+    if (message.type === 'ASB_REVIEW_STATUS') return bridge.compareStatus(source.id, compareChoice, 'Cross-review');
     const choice = { targetId: message.targetId, provider: message.provider };
     // The clicked chat is always the source; content scripts cannot act on behalf of another tab.
-    return bridge.locked(source.windowId, () => {
+    return bridge.locked(source.windowId, async () => {
       switch (message.type) {
+        case 'ASB_COMPARE':
+        case 'ASB_CROSS_REVIEW':
+        case 'ASB_REVISE': {
+          const settings = await loadSettings(chrome.storage.sync);
+          const menu = message.type === 'ASB_COMPARE' ? 'Compare' : 'Cross-review';
+          if (settings.shareMode !== message.expectedMode) throw new Error(`Sharing settings changed. Open ${menu} again to confirm the delivery mode.`);
+          if (message.type === 'ASB_CROSS_REVIEW') return bridge.crossReview(source.id, compareChoice, message.action, settings);
+          if (message.type === 'ASB_REVISE') return bridge.revise(source.id, compareChoice, message.reviewId, settings);
+          return bridge.compare(source.id, compareChoice, settings);
+        }
         case 'ASB_SEND': return bridge.send(source.id, message.targetIds);
         case 'ASB_SHARE': return shareReply(source, choice, message.reply, message.files, message.kind);
         case 'ASB_SHOW': return bridge.show(source.id, choice);
