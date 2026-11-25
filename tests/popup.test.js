@@ -14,12 +14,12 @@ async function until(check) {
   assert.fail('Popup did not reach the expected state.');
 }
 
-async function popup(t, storage) {
+async function popup(t, storage, sendMessage = async () => ({ ok: true, tabs: [], canManageSplit: false })) {
   const dom = new JSDOM(html, { url: 'https://fixture.test/popup.html', runScripts: 'outside-only', pretendToBeVisual: true });
   t.after(() => dom.window.close());
   const { window } = dom;
   window.testSettings = settingsModule;
-  window.chrome = { storage: { sync: storage }, runtime: { sendMessage: async () => ({ ok: true, tabs: [], canManageSplit: false }) } };
+  window.chrome = { storage: { sync: storage }, runtime: { sendMessage } };
   window.eval(translations);
   window.eval(script);
   const $ = selector => window.document.querySelector(selector);
@@ -265,4 +265,75 @@ test('a saved language is used when the popup opens, and a customized message is
   assert.equal(view.$('#share-message').value, settingsModule.DEFAULT_SHARE_MESSAGE, 'a reset message follows the language again');
   view.choose('prompt');
   assert.equal(view.$('#share-message').value, settingsModule.DEFAULT_PROMPT_MESSAGE);
+});
+
+// ---------- Opening an assistant from the Split View form ----------
+function browserWith(tabs, { peer = null, reply = { ok: true, message: 'Split View ready.' } } = {}) {
+  const sent = [];
+  return {
+    sent,
+    async sendMessage(message) {
+      if (message.type === 'ASB_LIST') return { ok: true, tabs, activeId: tabs[0]?.id, canManageSplit: true, peer };
+      sent.push(structuredClone(message));
+      return reply;
+    },
+  };
+}
+const options = (view, selector) => Array.from(view.$(selector).options, option => [option.value, option.textContent]);
+const submitPair = view => view.$('#pair-form').dispatchEvent(new view.window.Event('submit', { cancelable: true }));
+
+test('each side of a new split can be an open chat or an assistant to open', async t => {
+  const browser = browserWith([{ id: 7, name: 'Claude', title: 'Trip plan', index: 0 }]);
+  const view = await popup(t, memory(), browser.sendMessage);
+  await until(() => !view.$('#pair-section').hidden);
+  assert.deepEqual(options(view, '#right'), [
+    ['', 'Choose a chat…'], ['7', 'Claude · Trip plan'],
+    ['new:chatgpt', 'New ChatGPT chat'], ['new:claude', 'New Claude chat'], ['new:gemini', 'New Gemini chat'], ['new:grok', 'New Grok chat'],
+  ]);
+  assert.equal(view.$('#right optgroup').label, 'Open a new chat');
+  assert.equal(view.$('#left').value, '7', 'the open chat is offered on the left');
+  assert.equal(view.$('#right').value, '');
+  assert.equal(view.$('#pair').disabled, false, 'one open chat is enough');
+
+  submitPair(view);
+  await until(() => shown(view, '#status') === 'Choose a chat for each side.');
+  assert.deepEqual(browser.sent, [], 'nothing is asked for until both sides are chosen');
+
+  view.$('#right').value = 'new:gemini';
+  submitPair(view);
+  assert.equal(shown(view, '#status'), 'Opening the chat and creating the split…');
+  await until(() => shown(view, '#status') === 'Split View ready.');
+  assert.deepEqual(browser.sent, [{ type: 'ASB_PAIR', leftId: 7, rightProvider: 'gemini' }]);
+});
+
+test('with no AI chat open, two assistants can be chosen and opened together', async t => {
+  const browser = browserWith([]);
+  const view = await popup(t, memory({ language: 'zh-CN' }), browser.sendMessage);
+  await until(() => !view.$('#pair-section').hidden && view.$('#left').options.length > 1);
+  assert.deepEqual(options(view, '#left'), [
+    ['', '选择一个聊天…'], ['new:chatgpt', '新的 ChatGPT 聊天'], ['new:claude', '新的 Claude 聊天'], ['new:gemini', '新的 Gemini 聊天'], ['new:grok', '新的 Grok 聊天'],
+  ]);
+  assert.equal(view.$('#left optgroup').label, '新开一个聊天');
+  assert.equal(view.$('#pair').disabled, false);
+  view.$('#left').value = 'new:claude';
+  view.$('#right').value = 'new:gemini';
+  submitPair(view);
+  assert.equal(shown(view, '#status'), '正在打开聊天并创建分屏…');
+  await until(() => browser.sent.length === 1);
+  assert.deepEqual(browser.sent, [{ type: 'ASB_PAIR', leftProvider: 'claude', rightProvider: 'gemini' }]);
+});
+
+test('two open chats are still paired by their tabs, and a choice survives the list refreshing', async t => {
+  const browser = browserWith([{ id: 3, name: 'ChatGPT', title: 'One', index: 0 }, { id: 4, name: 'Claude', title: 'Two', index: 1 }]);
+  const view = await popup(t, memory(), browser.sendMessage);
+  await until(() => view.$('#left').value === '3');
+  assert.equal(view.$('#right').value, '4');
+  view.$('#right').value = 'new:grok';
+  pickLanguage(view, 'zh-CN');
+  await until(() => shown(view, '#right option[value="new:grok"]') === '新的 Grok 聊天');
+  assert.equal(view.$('#right').value, 'new:grok', 'redrawing the list keeps what was chosen');
+  view.$('#right').value = '4';
+  submitPair(view);
+  await until(() => browser.sent.length === 1);
+  assert.deepEqual(browser.sent, [{ type: 'ASB_PAIR', leftId: 3, rightId: 4 }]);
 });

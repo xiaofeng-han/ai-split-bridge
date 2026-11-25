@@ -23,6 +23,19 @@ The fixture substitutes host detection and mocks extension messaging. It does no
 
 In the local fixture, choose the language in **Popup** first; the provider pages opened in the same tab then use it.
 
+## Create a split from the popup
+
+Needs a Chrome that lets extensions create splits (155 or later); otherwise the popup has no **Split View** section.
+
+1. With one AI chat open and not in a split, open the popup. **Left** should offer that chat; under **Open a new chat**, each side should also offer **New ChatGPT chat**, **New Claude chat**, **New Gemini chat** and **New Grok chat**.
+2. Choose a new chat for **Right** and click **Create split**. A background tab should open, load, move beside the open chat and join it on the right. The open chat must not change position in the tab strip.
+3. Repeat with the new chat on the **Left**: it should appear to the left of the open chat, which again stays where it was.
+4. From a page that is not an AI chat, with no AI chat open, choose two new chats. Both should open at the end of the tab strip, side by side, with the left one focused.
+5. Try an open chat in a tab group and a pinned one: the new tab should join the same group or be pinned too. A chat already in another split must be refused before any tab opens.
+6. Sign out of one site and choose it as a new chat. If its sign-in page is on another address (Google’s, for example), no split is made and after about ten seconds the popup says the new chat has not finished opening. The tab stays open: sign in there, then create the split with it as an open chat.
+
+In the local fixture, open `/popup.html?pair` to see the form.
+
 ## Controls appear in the right places
 
 1. Open two AI chats in a native split (right-click a tab → Split View). On each side, confirm **Send both** sits just left of the site’s own Send or mic button. Confirm it looks like part of the composer: about the same height and corner shape as the site’s own buttons, in the site’s colours (for example Claude’s orange or Gemini’s blue for the menu’s Send button).

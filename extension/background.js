@@ -67,8 +67,16 @@ async function handle(message, sender) {
     return { ok: true, tabs: tabs.map(describe).filter(Boolean), activeId: active?.id, canManageSplit: manager.canManageSplit(), peer: context?.peer ?? null };
   }
   if (message.type === 'ASB_PAIR') {
-    if (!tabs.some(t => t.id === message.leftId) || !tabs.some(t => t.id === message.rightId)) throw new Error(t('Choose chats in this window.'));
-    return bridge.locked(windowId, () => manager.pair(message.leftId, message.rightId));
+    // Each side is an open chat in this window, or an assistant for the extension to open.
+    const [left, right] = [[message.leftId, message.leftProvider], [message.rightId, message.rightProvider]].map(([id, provider]) => {
+      if (provider !== undefined) {
+        if (!Object.hasOwn(PROVIDERS, provider)) throw new Error(t('Unknown assistant.'));
+        return { provider };
+      }
+      if (!tabs.some(tab => tab.id === id)) throw new Error(t('Choose chats in this window.'));
+      return id;
+    });
+    return bridge.locked(windowId, () => manager.pair(left, right, windowId));
   }
   if (message.type === 'ASB_OPEN') {
     if (!Object.hasOwn(PROVIDERS, message.provider)) throw new Error(t('Unknown assistant.'));
