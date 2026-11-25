@@ -21,6 +21,15 @@ The fixture substitutes host detection and mocks extension messaging. It does no
 3. Close all other AI tabs. Confirm both controls disappear. Open another AI tab and confirm they come back within a second or two.
 4. Switch a site between light and dark, and try a narrow or short pane. Menus should open on the side with more room and scroll rather than cover their own button. Report any control that overlaps, clips, or wraps badly, with the provider and a screenshot.
 
+## Gemini regression checks
+
+1. Put Gemini and ChatGPT in a native split. In a new Gemini chat, type two paragraphs with a blank line and click **Send both** immediately. Repeat from ChatGPT. Confirm both conversations receive the full text once.
+2. Share a previous prompt and a finished reply in each direction. In Gemini, also select a passage and use **Select messages…** for multiple turns. Check that the recipient gets the selected text, in order, with the right speaker. While Gemini is still answering a new prompt, **Compare** should wait for that answer.
+3. Compare the two finished answers in Gemini with **Send right away** off, then try with it on in empty composers. Run **Cross-review** and request a revision once the critiques finish. Verify the draft setting leaves the text editable and automatic delivery uses each recipient’s native Send.
+4. Attach two local PDFs and repeat **Send both** in each direction. Check the two filenames and contents once per chat. Repeat with a draft or attachment already present at the destination and confirm it is kept.
+
+For development, repeat on both Gemini layouts where available. One uses a Quill editor inside `rich-textarea`. The other uses a Lexical editor marked `data-test-id="prompt-input"` and separate sections for prompts and replies.
+
 ## Project and new-chat composers
 
 1. Open a ChatGPT project landing page with another AI chat open. Before sending its first message, confirm **Send both** appears beside the project composer’s controls. Type a harmless prompt and send to both; confirm each chat receives it once. Project instructions and stored project files are not copied.

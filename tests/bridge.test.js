@@ -269,6 +269,20 @@ for (const phase of ['ASB_PREPARE', 'ASB_STAGE', 'ASB_VALIDATE']) {
   });
 }
 
+for (const switchPane of [false, true]) {
+  test(`a Gemini share reports a retained draft when Send is missing (switch pane: ${switchPane})`, async () => {
+    const { model, bridge } = setup({ splitApi: false });
+    if (!switchPane) model.data.get(2).url = 'https://gemini.google.com/app/visible';
+    model.respond = (_id, message) => message.type === 'ASB_COMMIT'
+      ? { ok: true, status: 'draft' } : { ok: true };
+    const result = await bridge.share(1, { targetId: switchPane ? 3 : 2 }, 'My past prompt.', { send: true });
+    assert.equal(model.messages('ASB_VALIDATE')[0].args[1].keepIfSendMissing, true);
+    assert.equal(model.messages('ASB_COMMIT').length, 1);
+    assert.match(result.message, /Click Send in Gemini/);
+    assert.doesNotMatch(result.message, /sent to/i);
+  });
+}
+
 test('a shared reply whose chat navigates before the click is not sent', async () => {
   const { model, bridge } = setup();
   model.respond = (id, message) => {

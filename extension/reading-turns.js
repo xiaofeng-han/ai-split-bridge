@@ -17,6 +17,10 @@
   }
 
   function nativeId(element) {
+    if (element.matches("[data-test-id='model-response']")) {
+      const answer = element.querySelector("[data-model-response-turn-id]");
+      if (answer?.dataset.modelResponseTurnId) return 'gemini-response/' + answer.dataset.modelResponseTurnId;
+    }
     const marker = element.closest(idSelector) || element.querySelector(idSelector);
     if (!marker) return '';
     const attr = nativeIds.find(name => marker.getAttribute(name));
@@ -28,7 +32,13 @@
     // preceding prompt gives it a stable identity while its text grows.
     const context = role === 'assistant' ? promptKey : '';
     const identity = id || context;
-    const walker = document.createTreeWalker(element, NodeFilter.SHOW_ELEMENT | NodeFilter.SHOW_TEXT, {
+    let body = element;
+    if (element.matches("[data-test-id='model-response']")) {
+      body = element.querySelector("[data-testid='collapsible-response-content']") || element.querySelector("[data-model-response-turn-id]") || element;
+    } else if (element.matches("[data-test-id='user-query']")) {
+      body = element.querySelector("[data-testid='user-prompt-content']") || element;
+    }
+    const walker = document.createTreeWalker(body, NodeFilter.SHOW_ELEMENT | NodeFilter.SHOW_TEXT, {
       acceptNode(node) {
         if (node.nodeType === Node.TEXT_NODE) return NodeFilter.FILTER_ACCEPT;
         return node.matches(ignoreText) ? NodeFilter.FILTER_REJECT : NodeFilter.FILTER_SKIP;

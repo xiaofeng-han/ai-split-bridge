@@ -1,0 +1,33 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Gemini composer</title>
+<style>
+  .ql-editor { min-height: 40px }
+  .ql-clipboard { position: absolute; left: -100000px; height: 1px; width: 1px }
+</style>
+<main>
+  <input-area-v2>
+    <div data-node-type="input-area">
+      <fieldset class="input-area-fieldset" role="none">
+        <div class="text-input-field simplified-input-area">
+          <div class="single-line-format"><div class="text-input-field-main-area">
+            <div class="text-input-field_textarea-inner"><div class="textarea-wrapper">
+              <rich-textarea class="ql-container" enterkeyhint="send">
+                <div class="ql-editor" contenteditable="true" role="textbox" aria-label="为 Gemini 输入提示"></div>
+                <div class="ql-clipboard" contenteditable="true" tabindex="-1"></div>
+              </rich-textarea>
+            </div></div>
+          </div></div>
+          <div class="trailing-actions-wrapper"><div class="input-buttons-wrapper-bottom persistent-mic">
+            <button type="button" id="mic" aria-label="语音输入 (⌘⇧D)">Mic</button>
+            <div data-test-id="send-button-container">
+              <gem-icon-button class="send-button has-input submit" aria-disabled="false">
+                <button type="button" id="send" aria-label="发送">↑</button>
+              </gem-icon-button>
+            </div>
+          </div></div>
+        </div>
+      </fieldset>
+    </div>
+  </input-area-v2>
+</main>

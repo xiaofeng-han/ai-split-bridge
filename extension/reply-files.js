@@ -41,6 +41,16 @@
       keys.set(key, occurrence + 1);
       files.push({ key: `${key}#${occurrence}`, identity: key, source, name: cleanName(name), element, kind, ...(matchName ? { matchName } : {}) });
     };
+    if (location.hostname === 'gemini.google.com') {
+      for (const card of scope.querySelectorAll('section[data-test-id="generated-file-chip"]')) {
+        if (!visible(card)) continue;
+        const control = card.querySelector('a[download][href][data-test-id="download-button"], button[data-test-id="download-button"]');
+        const name = control?.getAttribute('download') || card.querySelector('[data-test-id="file-name"]')?.textContent.trim() || card.getAttribute('aria-label');
+        if (!name) continue;
+        const downloadable = control && visible(control) && !control.matches(':disabled, [aria-disabled="true"]');
+        add(`gemini-file:${name}`, name, control || card, downloadable ? 'download' : 'unavailable', name);
+      }
+    }
     for (const link of scope.querySelectorAll('a[href]')) {
       const href = link.getAttribute('href');
       let url;

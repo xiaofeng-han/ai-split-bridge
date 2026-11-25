@@ -138,6 +138,7 @@ test('Compare reads only readiness until chosen, then asks exactly the selected 
       assert.equal(result.ok, true, result.error);
       const stages = model.messages('ASB_STAGE');
       assert.equal(stages.length, 1);
+      assert.equal(!!model.messages('ASB_PREPARE')[0].args[1].draftOnly, mode === 'draft');
       const [id, staged] = stages[0].args;
       assert.equal(id, reviewerId);
       assert.equal(staged.source, false);
@@ -281,6 +282,7 @@ test('each review action sends the opposite original exactly once per selected p
       assert.equal(model.messages('ASB_STAGE').find(call => call.args[0] === id).args[1].text, payload.text);
     }
     assert.deepEqual(model.messages('ASB_KEEP').map(call => call.args[0]), mode === 'draft' ? [1, 2] : []);
+    assert.ok(model.messages('ASB_PREPARE').every(call => call.args[1].draftOnly === (mode === 'draft')));
     assert.deepEqual(model.messages('ASB_COMMIT').map(call => call.args[0]), mode === 'send' ? [1, 2] : []);
     assert.ok(model.messages().every(call => call.args[0] !== 3));
     const phases = model.messages().map(call => call.args[1].type);

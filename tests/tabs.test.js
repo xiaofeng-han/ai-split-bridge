@@ -53,6 +53,22 @@ test('closed assistants are offered as new chats, and a remembered conversation 
   ]);
 });
 
+test('the split remembers a saved Gemini Gem conversation and skips its duplicate tab', async () => {
+  const url = 'https://gemini.google.com/u/6/gem/custom-tutor/conversation-a';
+  const model = mockChrome([
+    chatTabs()[0], { id: 2, url, splitViewId: 10 }, { id: 3, url: url + '/?hl=zh-CN' },
+  ], { splitApi: false });
+  const manager = createTabManager(model.api);
+  const state = await manager.context(1);
+  assert.deepEqual(state.chats.map(chat => chat.id), [2]);
+  assert.equal(conversationKey('https://gemini.google.com/u/6/gem/custom-tutor'), null);
+  model.data.delete(3);
+  await manager.replace(2, { provider: 'claude' });
+  assert.equal((await manager.context(1)).closed.find(chat => chat.provider === 'gemini').remembered, true);
+  await manager.replace(2, { provider: 'gemini' });
+  assert.equal(model.data.get(2).url, url);
+});
+
 test('pair arranges existing tabs left/right even when their strip order is reversed', async () => {
   const model = mockChrome([
     { id: 2, url: 'https://claude.ai/new' },

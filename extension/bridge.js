@@ -96,12 +96,12 @@ export function createBridge(api, manager, { retryDelay = 500, retryLimit = 40 }
   }
 
   // One destination, one staged transaction, at most one native Send click.
-  async function deliver(sourceId, tabId, text, expect, { files = [], send = true, answer, verifyTarget } = {}) {
+  async function deliver(sourceId, tabId, text, expect, { files = [], send = true, answer, verifyTarget, keepIfSendMissing = false } = {}) {
     const requestId = crypto.randomUUID();
     const payload = { requestId, text, source: false, attachments: files.length };
     try {
       for (let attempt = 1; ; attempt++) {
-        try { await ask(tabId, 'ASB_PREPARE', { ...payload, ...expect, ...(answer && { answer }) }); break; }
+        try { await ask(tabId, 'ASB_PREPARE', { ...payload, ...expect, ...(answer && { answer }), ...(!send && { draftOnly: true }) }); break; }
         catch (error) {
           // Only a pane that was just opened is worth waiting for.
           if (!expect || !error.retry || attempt >= retryLimit) throw error;
@@ -109,7 +109,7 @@ export function createBridge(api, manager, { retryDelay = 500, retryLimit = 40 }
         }
       }
       await ask(tabId, 'ASB_STAGE', { ...payload, ...(files.length ? { files } : {}) });
-      await ask(tabId, 'ASB_VALIDATE', payload);
+      await ask(tabId, 'ASB_VALIDATE', { ...payload, ...(keepIfSendMissing && { keepIfSendMissing }) });
       if (verifyTarget) await verifyTarget();
       else chosen(await manager.context(sourceId), [tabId]);
       if (!send) {
@@ -120,7 +120,7 @@ export function createBridge(api, manager, { retryDelay = 500, retryLimit = 40 }
       const cleanup = await ask(tabId, 'ASB_CANCEL', { requestId }).catch(() => null);
       throw new Error(`Nothing was sent. ${error.message}${cleanup?.leftAttachments ? ' Remove the copied attachments still in that chat.' : ''}`);
     }
-    try { await ask(tabId, 'ASB_COMMIT', { requestId }); }
+    try { return await ask(tabId, 'ASB_COMMIT', { requestId }); }
     catch (error) { throw new Error(`${error.message} Delivery is unconfirmed; check that chat before sending again.`); }
     finally { await ask(tabId, 'ASB_CANCEL', { requestId }).catch(() => {}); }
   }
@@ -129,16 +129,20 @@ export function createBridge(api, manager, { retryDelay = 500, retryLimit = 40 }
     validateFiles(files);
     validateText(text, { allowEmpty: files.length > 0 });
     const state = await manager.context(sourceId);
+    async function sendShare(tabId, targetProvider, expect, sentMessage) {
+      const keepIfSendMissing = targetProvider === 'gemini' && !files.length;
+      const result = await deliver(sourceId, tabId, text, expect, { files, keepIfSendMissing });
+      return { ok: true, message: result.status === 'draft'
+        ? 'Your shared text is ready in Gemini. Click Send in Gemini to submit it.'
+        : sentMessage };
+    }
     if (targetId !== undefined) {
       const chat = state.chats.find(item => item.id === targetId);
       if (!chat) throw new Error('That chat closed or changed. Open Share again.');
       if (chat.side || !state.peer) {
         if (chat.asleep) throw new Error(`${chat.name} is asleep. Open its tab once to wake it, then try again.`);
         const where = chat.side ? '' : ' in its tab';
-        if (send) {
-          await deliver(sourceId, chat.id, text, undefined, { files, send });
-          return { ok: true, message: `Sent to ${chat.name}${where}.` };
-        }
+        if (send) return sendShare(chat.id, chat.provider, undefined, `Sent to ${chat.name}${where}.`);
         if (files.length) await deliver(sourceId, chat.id, text, undefined, { files, send: false });
         else await ask(chat.id, 'ASB_INSERT', { text });
         return { ok: true, message: `Draft added to ${chat.name}${where}. Review it, then send it there.` };
@@ -151,10 +155,7 @@ export function createBridge(api, manager, { retryDelay = 500, retryLimit = 40 }
     const shown = await manager.replace(state.peer.id, { tabId: targetId, provider });
     const expect = { provider: shown.provider, notPage: shown.previousPage };
     const name = PROVIDERS[shown.provider].name;
-    if (send) {
-      await deliver(sourceId, shown.tabId, text, expect, { files, send });
-      return { ok: true, message: `Sent to ${name}, now on the ${state.peer.side}.` };
-    }
+    if (send) return sendShare(shown.tabId, shown.provider, expect, `Sent to ${name}, now on the ${state.peer.side}.`);
     if (files.length) await deliver(sourceId, shown.tabId, text, expect, { files, send: false });
     else await insertWhenReady(shown.tabId, text, expect);
     return { ok: true, message: `${name} is on the ${state.peer.side} with the draft ready. Review it, then send it there.` };
@@ -263,7 +264,7 @@ export function createBridge(api, manager, { retryDelay = 500, retryLimit = 40 }
       ids: pair.map(chat => chat.id), labels: pair.map(chat => `${chat.name} (${chat.side} pane)`), requestId: reviewId, sendNow,
       payload: (_id, type, i) => ({
         requestId: reviewId, text: prompts[i], attachments: 0, source: false,
-        ...(type === 'ASB_PREPARE' && { answer: answers[i], review: { reviewId, peerId: pair[1 - i].id, quotedStart: instructions.length } }),
+        ...(type === 'ASB_PREPARE' && { answer: answers[i], draftOnly: !sendNow, review: { reviewId, peerId: pair[1 - i].id, quotedStart: instructions.length } }),
       }),
       verify: () => verifyAnswers(pair, choice, answers, 'Cross-review'),
     });

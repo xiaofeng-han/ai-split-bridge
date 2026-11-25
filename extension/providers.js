@@ -1,7 +1,7 @@
 export const PROVIDERS = Object.freeze({
   chatgpt: { name: 'ChatGPT', url: 'https://chatgpt.com/', hosts: ['chatgpt.com', 'chat.openai.com'], conversation: /\/c\/[^/?#]+/ },
   claude: { name: 'Claude', url: 'https://claude.ai/new', hosts: ['claude.ai'], conversation: /\/chat\/[^/?#]+/ },
-  gemini: { name: 'Gemini', url: 'https://gemini.google.com/app', hosts: ['gemini.google.com'], conversation: /\/app\/[^/?#]+/ },
+  gemini: { name: 'Gemini', url: 'https://gemini.google.com/app', hosts: ['gemini.google.com'], conversation: /\/(?:app\/[^/]+|gem\/[^/]+\/[^/]+)(?=\/?$)/ },
   grok: { name: 'Grok', url: 'https://grok.com/', hosts: ['grok.com'], conversation: /\/c\/[^/?#]+/ },
 });
 

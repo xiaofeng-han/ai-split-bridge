@@ -6,6 +6,7 @@ import { composeShare } from "../extension/settings.js";
 
 const adapterSource = await readFile(new URL("../extension/adapters.js", import.meta.url), "utf8");
 const contentSource = await readFile(new URL("../extension/content.js", import.meta.url), "utf8");
+const geminiQuillComposer = await readFile(new URL("./fixtures/gemini-quill-composer.html", import.meta.url), "utf8");
 
 const fixtures = {
   chatgpt: { host: "chatgpt.com", editor: "<div contenteditable='true' role='textbox' aria-label='Ask ChatGPT'></div>", send: "Send", response: "<div data-message-author-role='assistant'><div class='markdown'><p>First paragraph.</p><p>Second paragraph.</p></div></div>" },
@@ -101,6 +102,103 @@ test("a past ChatGPT prompt reaches Gemini when its native Send appears after st
   assert.deepEqual(submitted, [text]);
   assert.equal(destination.clicks(), 0, "the button outside the current composer is never used");
   assert.equal(micClicks, 0);
+});
+
+test("Gemini shares a prompt through the native Send alongside Quill's offscreen clipboard", async t => {
+  const f = setup("gemini", { body: geminiQuillComposer });
+  t.after(f.close);
+  const doc = f.window.document;
+  const submitted = [];
+  doc.querySelector("#send").onclick = () => submitted.push(f.adapter.getDraft().text);
+  const text = composeShare({}, { assistant: "ChatGPT", kind: "prompt", reply: "Compare the two outlines." });
+  const request = { requestId: "gemini-quill-share", text };
+  f.adapter.preflight(request);
+  await f.adapter.stage(request);
+  await f.adapter.validate(request);
+  const host = doc.querySelector("gem-icon-button");
+  host.setAttribute("aria-disabled", "true");
+  assert.throws(() => f.adapter.commit(request), /not ready/);
+  host.setAttribute("aria-disabled", "false");
+  assert.equal(f.adapter.commit(request).status, "clicked");
+  assert.deepEqual(submitted, [text]);
+  assert.equal(f.clicks(), 0, "the persistent microphone must never be clicked");
+  assert.equal(doc.querySelector(".ql-clipboard").textContent, "");
+});
+
+test("Gemini keeps a verified text share as an editable draft if its Send disappears", async t => {
+  const f = setup("gemini");
+  t.after(f.close);
+  const request = { requestId: "manual-gemini-share", text: "A previously sent prompt" };
+  f.adapter.preflight(request);
+  await f.adapter.stage(request);
+  await f.adapter.validate({ ...request, keepIfSendMissing: true });
+  f.window.document.querySelector("button").remove();
+  assert.equal(f.adapter.commit(request).status, "draft");
+  await f.adapter.cancel(request);
+  assert.equal(f.adapter.getDraft().text, request.text);
+  assert.equal(f.clicks(), 0);
+  assert.throws(() => f.adapter.commit(request), /already handled/);
+});
+
+test("a Gemini comparison draft needs an unchanged answer and editor, even when the native Send is disabled", async t => {
+  const f = setup("gemini");
+  t.after(f.close);
+  f.window.document.querySelector("button").disabled = true;
+  const answer = f.adapter.readCompareAnswer();
+  const request = { requestId: "comparison-draft", text: "Compare the two responses", answer, draftOnly: true };
+  f.adapter.preflight(request);
+  await f.adapter.stage(request);
+  await f.adapter.validate(request);
+  assert.throws(() => f.adapter.commit(request), /draft/i);
+  f.setDraft("My edited comparison");
+  assert.throws(() => f.adapter.keep(request), /draft changed/i);
+  await f.adapter.cancel(request);
+  assert.equal(f.adapter.getDraft().text, "My edited comparison");
+  assert.equal(f.clicks(), 0);
+});
+
+test("Send both can prepare a Gemini tab while its editor is mounting", async t => {
+  const f = setup("gemini");
+  t.after(f.close);
+  const form = f.editor.closest("form");
+  form.remove();
+  const request = { requestId: "gemini-mount", text: "Two outlines" };
+  f.window.setTimeout(() => f.window.document.querySelector("main").append(form), 80);
+  await f.adapter.preflight(request);
+  await f.adapter.stage(request);
+  await f.adapter.validate(request);
+  assert.equal(f.adapter.commit(request).status, "clicked");
+  assert.equal(f.clicks(), 1);
+});
+
+test("a shared draft waiting for Gemini's editor cannot follow a conversation change", async t => {
+  const f = setup("gemini");
+  t.after(f.close);
+  const form = f.editor.closest("form");
+  form.remove();
+  const insertion = f.adapter.insert({ text: "For the first conversation" });
+  f.window.history.pushState({}, "", "/app/another");
+  f.window.document.querySelector("main").append(form);
+  await assert.rejects(insertion, /conversation changed/i);
+  assert.equal(f.adapter.getDraft().text, "");
+  assert.equal(f.clicks(), 0);
+});
+
+test("Gemini never treats a lone Quill clipboard as the composer or ignores another editor", async t => {
+  const f = setup("gemini", { body: geminiQuillComposer });
+  t.after(f.close);
+  const doc = f.window.document;
+  const request = { requestId: "ambiguous-quill", text: "Use the intended chat" };
+  f.adapter.preflight(request);
+  await f.adapter.stage(request);
+  const extra = doc.createElement("div");
+  extra.setAttribute("contenteditable", "true");
+  doc.querySelector("rich-textarea").append(extra);
+  assert.throws(() => f.adapter.commit(request), /Cannot identify Gemini's Send button/);
+  extra.remove();
+  f.editor.remove();
+  assert.throws(() => f.adapter.getDraft(), /Cannot find Gemini's text composer/);
+  assert.equal(f.clicks(), 0);
 });
 
 test("Gemini rechecks the site's current action at commit and refuses unrelated Send controls", async t => {
@@ -449,6 +547,17 @@ test('navigation guard allows saved idle chats and refuses unsaved or temporary 
   assert.equal(fixture.adapter.canLeave().ok,true);
   fixture.dom.reconfigure({url:'https://chatgpt.com/c/saved?temporary-chat=true'});
   assert.throws(()=>fixture.adapter.canLeave(),/saved conversation link/);
+});
+
+test("Gemini can leave a saved Gem conversation while protecting unsent drafts and unsaved Gem chats", t => {
+  const f = setup("gemini", { url: "https://gemini.google.com/u/6/gem/tutor/turn-a" });
+  t.after(f.close);
+  assert.equal(f.adapter.canLeave().ok, true);
+  f.setDraft("An unfinished question");
+  assert.throws(() => f.adapter.canLeave(), /draft/);
+  f.setDraft("");
+  f.dom.reconfigure({ url: "https://gemini.google.com/u/6/gem/tutor" });
+  assert.throws(() => f.adapter.canLeave(), /saved conversation link/);
 });
 
 test('navigation guard lets a pane leave a sign-in page but not unrecognized unsent text', t => {

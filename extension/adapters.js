@@ -31,13 +31,15 @@
     gemini: {
       name: "Gemini",
       hosts: ["gemini.google.com"],
-      editors: ["rich-textarea .ql-editor[contenteditable='true']", "rich-textarea [contenteditable='true']", ".ql-editor[contenteditable='true']"],
+      editors: ["form [data-test-id='prompt-input'][contenteditable='true'], rich-textarea .ql-editor[contenteditable='true']", "rich-textarea [contenteditable='true']:not(.ql-clipboard)", ".ql-editor[contenteditable='true']"],
       send: ["button.send-button", "button[data-test-id='send-button']", "button[aria-label='Send message' i]", "button[aria-label='Send' i]", "button[aria-label='Submit prompt' i]"],
-      stop: ["button.stop-button", "button[data-test-id='stop-button']", "button[aria-label='Stop response' i]", "button[aria-label='Stop generating' i]", "button[aria-label='Stop' i]", "button[aria-label='停止回答']", "button[aria-label='停止回复']", "button[aria-label='停止生成']"],
+      stop: ["button.stop-button", "button[data-test-id='stop-button']", "button.send-button.stop", "gem-icon-button.send-button.stop button", "button[aria-label='Stop response' i]", "button[aria-label='Stop generating' i]", "button[aria-label='Stop' i]", "button[aria-label='停止回答']", "button[aria-label='停止回复']", "button[aria-label='停止生成']"],
       voice: ["button[aria-label^='Dictate']", "button[aria-label='Microphone']"],
       group: [".input-buttons-wrapper-bottom"],
-      responses: ["model-response .model-response-text", "model-response message-content", "model-response .markdown-main-panel"],
-      prompts: ["user-query"],
+      responses: ["model-response .model-response-text", "model-response message-content", "model-response .markdown-main-panel",
+        "[data-test-id='model-response']", "[data-model-response-turn-id]", "[data-testid='collapsible-response-content']"],
+      prompts: ["user-query", "[data-test-id='user-query']", "[data-testid='user-prompt-content']"],
+      ignore: ["[data-hide-from-message-actions]", "model-thoughts", "[data-ai-split-bridge]"],
     },
     grok: {
       name: "Grok",
@@ -148,7 +150,9 @@
 
   function firstMatch(selectors, root = document) {
     for (const selector of selectors) {
-      const matches = [...root.querySelectorAll(selector)].filter(visible);
+      const matches = [...root.querySelectorAll(selector)].filter(node => visible(node) &&
+        !(provider === "gemini" && selectors === config.editors &&
+          node.closest("[aria-hidden='true'], nav, aside, model-response, user-query, [data-turn-content-visibility], [data-ai-split-bridge]")));
       if (matches.length > 1) throw new Error(`${config.name} has multiple matching chat controls. Open one conversation and try again.`);
       if (matches.length === 1) return matches[0];
     }
@@ -203,7 +207,13 @@
   }
 
   function busy() {
-    return config.stop.some((selector) => [...document.querySelectorAll(selector)].some(visible));
+    if (provider === "gemini") {
+      const turns = document.querySelectorAll("section[data-test-id='model-response'][data-turn-status]");
+      const last = Array.from(turns).findLast(turn => !turn.closest("aside, nav, [aria-hidden='true']") && visible(turn));
+      if (last && ["pending", "streaming"].includes(last.dataset.turnStatus)) return true;
+    }
+    return [...document.querySelectorAll(config.stop.join(", "))].some(button => visible(button)
+      && (provider !== "gemini" || !button.closest("aside, nav, [aria-hidden='true'], model-response, user-query, [data-turn-content-visibility]")));
   }
 
   function assertIdle() {
@@ -211,8 +221,14 @@
   }
 
   // ---------- Attachments ----------
+  const geminiFileRow = 'ul[aria-label] > li';
+  const geminiPreview = "uploader-file-preview, gem-attachment";
+
   // The box holding the editor, its attachment tiles, and its Send controls.
   function attachmentScope(editor) {
+    if (provider === "gemini") {
+      return editor.closest("form, input-area-v2, input-area, .input-area-container") || composerRoot(editor);
+    }
     const controls = [...config.send, ...config.stop, ...(config.voice || [])].join(", ");
     let scope = composerRoot(editor);
     for (let depth = 0; depth < 6 && scope.parentElement && scope !== document.body && !scope.querySelector(controls); depth++) scope = scope.parentElement;
@@ -221,8 +237,34 @@
 
   const outsideEditor = (node, editor) => !editor.contains(node) && !node.closest("[data-ai-split-bridge]") && visible(node);
 
+  function geminiRemoveName(node) {
+    const label = normalize(node.getAttribute("aria-label"));
+    return label.match(/^(?:Remove|Supprimer) (.+)$/)?.[1] || label.match(/^移除[“「](.+)[”」]$/)?.[1]
+      || label.match(/^(.+) entfernen$/)?.[1] || label.match(/^「(.+)」を削除$/)?.[1];
+  }
+
+  function geminiTrayCard(row, editor) {
+    if (row.closest('[role="menu"], [role="listbox"], [role="dialog"], [data-ai-split-bridge]')) return false;
+    const list = row.parentElement;
+    const knownList = /^(Attached files|附加的文件|附加檔案)$/i.test(list.getAttribute("aria-label"));
+    const form = editor.closest("form");
+    if (!knownList && !(form && row.closest("form") === form && editor.matches('[data-test-id="prompt-input"]'))) return false;
+    if (row.querySelector('[role="progressbar"], [role="alert"]')) return true;
+    const buttons = [...row.querySelectorAll('button[aria-label]:not([data-testid])')];
+    // The same AttachmentCard renders local files, cloud items and selected
+    // templates. Its static card is focusable; videos have a separate open
+    // action. A plain suggestion like Add avatar has neither structure.
+    return buttons.some(geminiRemoveName) || (buttons.length > 0 && (
+      row.querySelector('[tabindex="0"] button[aria-label]') || buttons.length > 1));
+  }
+
   function isRemover(node, editor) {
     const label = normalize(node.getAttribute("aria-label") || node.title || "");
+    if (provider === "gemini") {
+      const row = node.closest(geminiFileRow);
+      if (node.closest(geminiPreview) && /^(?:关闭|關閉|移除|删除|刪除)/.test(label)) return true;
+      if (row && !node.closest(geminiPreview)) return geminiTrayCard(row, editor) && !node.hasAttribute('data-testid') && !!geminiRemoveName(node);
+    }
     if (/^close\b/i.test(label) && node.closest('uploader-file-preview, gem-attachment')) return true;
     if (!/^(remove|delete|cancel)\b/i.test(label)) return false;
     if (FILE_WORD.test(label)) return true;
@@ -235,11 +277,23 @@
 
   function removers(editor) {
     return [...attachmentScope(editor).querySelectorAll("button, [role='button']")]
-      .filter((node) => outsideEditor(node, editor) && isRemover(node, editor));
+      .filter(node => {
+        if (provider === "gemini" && node.closest(`${geminiFileRow}, ${geminiPreview}`)) {
+          // The remove action is revealed on hover. Its tile stays in the draft.
+          return !editor.contains(node) && laidOut(node) && !node.closest("[data-ai-split-bridge]") && isRemover(node, editor);
+        }
+        return outsideEditor(node, editor) && isRemover(node, editor);
+      });
   }
 
   function attachmentTiles(editor) {
-    const tiles = [...attachmentScope(editor).querySelectorAll(previewSelectors)].filter((node) => outsideEditor(node, editor));
+    const scope = attachmentScope(editor);
+    const tiles = [...scope.querySelectorAll(previewSelectors)].filter((node) => outsideEditor(node, editor));
+    if (provider === "gemini") {
+      for (const row of scope.querySelectorAll(geminiFileRow)) {
+        if (outsideEditor(row, editor) && geminiTrayCard(row, editor)) tiles.push(row);
+      }
+    }
     return tiles.filter((node) => !tiles.some((other) => other !== node && other.contains(node)));
   }
 
@@ -248,12 +302,15 @@
   }
 
   function assertNoAttachments(editor) {
-    if (attachmentCount(editor)) throw new Error(`${config.name} already has attachments in its composer. Send or remove them first; they have been kept.`);
+    if (!attachmentCount(editor)) return;
+    if (provider === "gemini") throw new Error("Gemini already has attachments or selected items in its composer. Send or clear them first.");
+    throw new Error(`${config.name} already has attachments in its composer. Send or remove them first; they have been kept.`);
   }
 
   function assertUploadsAccepted(editor) {
     for (const tile of attachmentTiles(editor)) {
-      if (tile.matches('[data-state="failed"], [data-state="error"]') || tile.querySelector('[data-state="failed"], [data-state="error"]')) {
+      const geminiError = provider === "gemini" && [...tile.querySelectorAll('[role="alert"]')].some(visible);
+      if (geminiError || tile.matches('[data-state="failed"], [data-state="error"]') || tile.querySelector('[data-state="failed"], [data-state="error"]')) {
         throw new Error(`${config.name} rejected an attachment. ${normalize(tile.textContent).slice(0,160)} Check or remove it before trying again.`);
       }
     }
@@ -268,7 +325,7 @@
   const tray = [];
   let injecting = false;
   function composerEditor() {
-    try { return firstMatch(config.editors); } catch { return null; }
+    try { return provider === "gemini" ? getEditor() : firstMatch(config.editors); } catch { return null; }
   }
   function remember(files) {
     if (injecting || !files?.length) return;
@@ -299,6 +356,31 @@
     if (!count) {
       tray.length = 0;
       return { files: [], unknown: 0 };
+    }
+    if (provider === "gemini") {
+      const tiles = attachmentTiles(editor);
+      if (tiles.length === count && tiles.every(tile => tile.matches(geminiFileRow))) {
+        // React keeps the full filename in the remove action even when the
+        // visible title is truncated. Matching only the count could reuse
+        // an earlier upload or a file picked in an unrelated dialog.
+        const available = tray.slice(), files = [];
+        for (const tile of tiles) {
+          const buttons = [...tile.querySelectorAll('button[aria-label]:not([data-testid])')];
+          let name = buttons.map(geminiRemoveName).find(Boolean);
+          if (!name) {
+            // Without a known translation, require the exact filename on the
+            // card as well as in an action label. A substring alone could
+            // match a different file. Unverifiable or truncated names stop
+            // sharing instead of silently dropping the item.
+            const titles = [...tile.querySelectorAll('span, img[alt]')].map(node => node.getAttribute('alt') || node.textContent);
+            const matched = available.filter(file => titles.includes(file.name) && buttons.some(button => button.getAttribute('aria-label').includes(file.name)));
+            if (matched.length === 1) name = matched[0].name;
+          }
+          const index = available.findIndex(file => file.name === name);
+          if (index >= 0) files.push(...available.splice(index, 1));
+        }
+        return { files, unknown: count - files.length };
+      }
     }
     if (tray.length <= count) return { files: tray.slice(), unknown: count - tray.length };
     // More files were attached than are still shown: keep the ones named on a tile, then the latest.
@@ -373,7 +455,8 @@
         notCopied.push(`${file.name} (could not be read)`);
       }
     }
-    if (unknown) notCopied.push(`${unknown} attachment${unknown === 1 ? "" : "s"} added before the extension could read ${unknown === 1 ? "it" : "them"}`);
+    if (unknown && provider === "gemini") notCopied.push(`${unknown} Gemini composer item${unknown === 1 ? "" : "s"} without a verified local file`);
+    else if (unknown) notCopied.push(`${unknown} attachment${unknown === 1 ? "" : "s"} added before the extension could read ${unknown === 1 ? "it" : "them"}`);
     return { ok: true, text, files: copies, notCopied };
   }
 
@@ -387,6 +470,13 @@
     const inputs = [...document.querySelectorAll("input[type='file']")]
       .filter((input) => !input.disabled && (files.length === 1 || input.multiple) && files.every((file) => allows(input, file)));
     const scope = attachmentScope(editor);
+    if (provider === "gemini") {
+      // The React form can have a camera picker while the ordinary picker
+      // lives beside it. Its editor has a native file paste handler.
+      const local = inputs.filter(input => scope.contains(input) && !input.hasAttribute("webkitdirectory")
+        && !input.hasAttribute("capture") && !input.closest('aside, [role="dialog"]'));
+      return local.length === 1 ? local[0] : null;
+    }
     return inputs.find((input) => scope.contains(input)) || (inputs.length === 1 ? inputs[0] : null);
   }
 
@@ -423,11 +513,15 @@
     }, 30_000);
     if (transaction.input) transaction.input.value = "";
     if (!arrived) throw new Error(`${config.name} did not show the copied attachments. It may not accept these files.`);
+    // A kept draft can subsequently be the source of Send both.
+    if (provider === "gemini") tray.splice(0, tray.length, ...files);
   }
 
   // Removes only the tiles this request added; returns how many could not be removed.
   async function detach(transaction) {
-    const added = () => removers(transaction.editor).filter((button) => !transaction.removersBefore.has(button));
+    const added = () => removers(transaction.editor).filter(button => !transaction.removersBefore.has(button)
+      && (provider !== "gemini" || !button.closest(geminiFileRow) || button.closest(geminiPreview)
+        || transaction.files.some(file => file.name === geminiRemoveName(button))));
     for (let tries = 0; tries <= transaction.files.length + 1 && added().length; tries++) {
       injecting = true;
       try { added().at(-1).click(); } finally { injecting = false; }
@@ -443,40 +537,54 @@
     const pageBoundary = "main, body, html, [role='main'], [role='log'], nav, aside, [role='navigation']";
     const controlOwner = "form, input-area-v2, input-area, .composer, [data-testid='composer'], aside, nav, [role='dialog'], [role='search'], [role='region'], [role='complementary']";
     const sendName = /^(?:(?:send|submit)(?: (?:message|prompt|query))?(?: to Gemini)?|(?:发送|發送|傳送|提交)(?:消息|訊息|提示(?:詞|词)?)?)\s*(?:[（(][^()（）]+[)）])?$/i;
-    for (let root = editor.parentElement, depth = 0; root && depth < 10; root = root.parentElement, depth++) {
-      if (root.matches(pageBoundary) || root.querySelector("model-response, user-query, [role='log']")) break;
-      const otherEditor = [...root.querySelectorAll("[contenteditable='true']")]
-        .some(other => other !== editor && !editor.contains(other) && !other.contains(editor) && visible(other));
+    const lexicalForm = editor.matches("[data-test-id='prompt-input']") ? editor.closest("form") : null;
+    const nativeComposer = lexicalForm || editor.closest("input-area-v2, input-area");
+    const quill = editor.closest("rich-textarea, .ql-container");
+    for (let root = editor.parentElement, depth = 0; root && (nativeComposer || depth < 10); root = root.parentElement, depth++) {
+      if (root.matches(pageBoundary) || root.querySelector("model-response, user-query, [data-turn-content-visibility]")
+        || (!nativeComposer && root.querySelector("[role='log']"))) break;
+      // Quill's offscreen paste buffer has a layout box and contenteditable=true.
+      // Only ignore the helper belonging to this editor's own Quill instance.
+      const otherEditor = [...root.querySelectorAll("[contenteditable='true']")].some(other =>
+        other !== editor && !editor.contains(other) && !other.contains(editor)
+        && !(quill && other.matches(".ql-clipboard") && other.closest("rich-textarea, .ql-container") === quill)
+        && visible(other));
       if (otherEditor) break;
       const candidates = [...root.querySelectorAll("button, [role='button']")].filter(button => {
         const owner = button.closest(controlOwner);
         if ((owner && !owner.contains(editor)) || editor.contains(button)
-          || button.closest("[data-ai-split-bridge], [role='menu'], [aria-hidden='true']")) return false;
+          || button.closest("[data-ai-split-bridge], [role='menu'], [role='log'], [aria-hidden='true'], [data-test-id='stop-button'], .stop-button, .send-button.stop")) return false;
         // A shared send/stop slot may retain its CSS class after changing actions.
         // Prefer the current accessible name whenever the page provides one.
         const labelledBy = (button.getAttribute("aria-labelledby") || "").split(/\s+/)
           .map(id => id && document.getElementById(id)?.textContent).filter(Boolean).join(" ");
         const name = normalize(labelledBy || button.getAttribute("aria-label") || button.title || button.getAttribute("mattooltip"));
+        // Both Gemini front ends expose a language-independent submit action.
+        // Require the form owner or Quill's current submit state and arrow together.
+        const lexicalSubmit = lexicalForm && button.form === lexicalForm && button.matches("button[type='submit'][data-test-id='send-button']");
+        const quillSubmit = quill && button.closest("[data-test-id='send-button-container'], .send-button-container")
+          && button.closest(".send-button.has-input.submit") && button.querySelector("[data-mat-icon-name='arrow_upward'], [fonticon='arrow_upward'], .send-button-icon");
+        if ((lexicalSubmit || quillSubmit) && !/^(?:stop|cancel|dictate|microphone|voice|停止|取消|语音|語音)/i.test(name)) return visible(button);
         const isSend = name ? sendName.test(name)
-          : sendName.test(normalize(button.textContent)) || button.matches("button.send-button, [data-test-id='send-button'], [data-testid='send-button']")
+          : sendName.test(normalize(button.textContent)) || button.matches("[data-test-id='send-button'], [data-testid='send-button']")
             || !!button.querySelector("[data-mat-icon-name='send'], [fonticon='send']");
         return isSend && visible(button);
       });
       if (candidates.length > 1) throw new Error("Gemini has multiple Send buttons in this composer. Open one conversation and try again.");
       if (candidates.length) return candidates[0];
-      if (root.matches("form, input-area-v2, .composer, [data-testid='composer'], [role='dialog']")) break;
+      if (root === nativeComposer || root.matches("form, .composer, [data-testid='composer'], [role='dialog']")) break;
     }
     return null;
   }
 
-  function sendButton(editor, waitForRender = false) {
+  function sendButton(editor, { waitForRender = false, allowMissing = false } = {}) {
     const scope = composerRoot(editor);
     const button = provider === "gemini" ? geminiSendButton(editor) : firstMatch(config.send, scope) || firstMatch(config.send);
     if (!button) {
-      if (waitForRender) return null;
+      if (waitForRender || allowMissing) return null;
       throw new Error(`Cannot identify ${config.name}'s Send button. Nothing was sent from this tab.`);
     }
-    if (button.disabled || button.getAttribute("aria-disabled") === "true" || button.closest("[inert]")) {
+    if (button.matches(":disabled") || button.closest("[aria-disabled='true'], [inert]")) {
       if (waitForRender) return null;
       throw new Error(`${config.name}'s Send button is not ready. Nothing was sent from this tab.`);
     }
@@ -530,18 +638,30 @@
       range.selectNodeContents(editor);
       selection.removeAllRanges();
       selection.addRange(range);
-      let inputFired = false;
-      const onInput = () => { inputFired = true; };
-      editor.addEventListener("input", onInput);
-      let inserted;
-      try {
-        // Use the browser editing pipeline so ProseMirror/Quill receive an edit.
-        inserted = document.execCommand("insertText", false, text);
-      } finally {
-        editor.removeEventListener("input", onInput);
+      if (provider === "gemini" && editor.matches("[data-lexical-editor='true'][data-test-id='prompt-input']") && (!text || text.includes("\n"))) {
+        // Lexical reconciles each line of insertText separately. Its paste handler
+        // applies the entire prompt as one edit to the site's controlled state.
+        document.dispatchEvent(new Event("selectionchange"));
+        if (text) {
+          const transfer = new DataTransfer();
+          transfer.setData("text/plain", text);
+          editor.dispatchEvent(new ClipboardEvent("paste", { clipboardData: transfer, bubbles: true, cancelable: true }));
+        } else {
+          editor.dispatchEvent(new InputEvent("beforeinput", { inputType: "deleteContentBackward", bubbles: true, cancelable: true }));
+        }
+      } else {
+        let inputFired = false;
+        const onInput = () => { inputFired = true; };
+        editor.addEventListener("input", onInput);
+        let inserted;
+        try {
+          inserted = document.execCommand("insertText", false, text);
+        } finally {
+          editor.removeEventListener("input", onInput);
+        }
+        if (!inserted) throw new Error(`Could not safely edit ${config.name}'s composer. Check its draft before continuing.`);
+        if (!inputFired) editor.dispatchEvent(new InputEvent("input", { bubbles: true, inputType: "insertText", data: text }));
       }
-      if (!inserted) throw new Error(`Could not safely edit ${config.name}'s composer. Check its draft before continuing.`);
-      if (!inputFired) editor.dispatchEvent(new InputEvent("input", { bubbles: true, inputType: "insertText", data: text }));
     }
     // Give controlled editors a chance to render their authoritative state.
     await wait(100);
@@ -557,8 +677,19 @@
     }
   }
 
-  function preflight({ requestId: id, text, source = false, attachments = 0, provider: expected, notPage, answer, review }) {
-    assertExpectedPage(expected, notPage);
+  // A Gemini tab can load the transcript before it mounts its editor. A pane
+  // being switched already has its own retry loop in the background worker.
+  function withMountedComposer(request, action) {
+    assertExpectedPage(request.provider, request.notPage);
+    if (provider !== "gemini" || request.provider || firstMatch(config.editors)) return action(request);
+    const page = location.href;
+    return until(() => location.href !== page || firstMatch(config.editors), 4000).then(() => {
+      if (location.href !== page) throw new Error("The conversation changed while the Gemini composer was opening. Try again in the intended chat.");
+      return action(request);
+    });
+  }
+
+  function preflight({ requestId: id, text, source = false, attachments = 0, answer, review, draftOnly = false }) {
     const originalTurn = answer && checkedAnswerElement(answer);
     if (review !== undefined) {
       if (!answer || source || attachments || !Number.isSafeInteger(review?.peerId) || review.peerId < 0) {
@@ -584,8 +715,9 @@
     if (!source && !blankEditor(editor)) throw new Error(`${config.name} already has a draft. Send or clear it first; your draft has been kept.`);
     if (!source) assertNoAttachments(editor);
     // Send stays disabled while the site uploads attachments; validation waits for it.
-    if (source && !attached) sendButton(editor);
-    transactions.set(id, { editor, text, original, source, answer, review, reviewSource: review && reviewTurnKey(originalTurn), attachments, sourceAttachments: source ? attached : 0, files: [], url: location.href, state: "prepared", expires: Date.now() + TRANSACTION_TTL + (attached ? 90_000 : 0) });
+    // Gemini renders Send asynchronously for locally typed text as well as for staged copies.
+    if (source && !attached && provider !== "gemini") sendButton(editor);
+    transactions.set(id, { editor, text, original, source, answer, review, draftOnly, reviewSource: review && reviewTurnKey(originalTurn), attachments, sourceAttachments: source ? attached : 0, files: [], url: location.href, state: "prepared", expires: Date.now() + TRANSACTION_TTL + (attached ? 90_000 : 0) });
     return { ok: true };
   }
 
@@ -608,17 +740,19 @@
     return { ok: true };
   }
 
-  function ready(transaction) {
+  function ready(transaction, options) {
     if (transaction.state !== "staged") throw new Error("The draft has not been staged.");
     assertUnchanged(transaction, transaction.text);
     assertUploadsAccepted(transaction.editor);
     if (uploadsPending(transaction.editor)) throw new Error(`${config.name} is still processing the attachments. Wait for them to finish.`);
     const expected = transaction.source ? transaction.sourceAttachments : transaction.attachments;
     if (attachmentCount(transaction.editor) !== expected) throw new Error(`${config.name}'s attachments changed or an upload failed. Check its composer; nothing further was sent.`);
-    return sendButton(transaction.editor);
+    // Reading back a text-only draft is sufficient when the user chose to send it manually.
+    if (transaction.draftOnly && !expected) return null;
+    return sendButton(transaction.editor, options);
   }
 
-  async function validate({ requestId: id }) {
+  async function validate({ requestId: id, keepIfSendMissing = false }) {
     const transaction = transactionFor(id);
     if (transaction.files.length || attachmentCount(transaction.editor)) {
       // Uploads keep Send disabled for a while after the tiles appear.
@@ -627,13 +761,17 @@
         assertUploadsAccepted(transaction.editor);
         try { return !!ready(transaction); } catch { return false; }
       }, 60_000, 250);
-    } else if (provider === "gemini") {
+    } else if (provider === "gemini" && !transaction.draftOnly) {
       await until(() => {
         assertUnchanged(transaction, transaction.text);
-        return !!sendButton(transaction.editor, true);
+        return !!sendButton(transaction.editor, { waitForRender: true });
       }, 4000);
     }
-    ready(transaction);
+    // Only an ordinary one-way text share may finish as a manual draft.
+    const allowMissing = keepIfSendMissing === true && provider === "gemini"
+      && !transaction.source && !transaction.answer && !transaction.attachments;
+    ready(transaction, { allowMissing });
+    transaction.allowMissingSend = allowMissing;
     // Other chats may still be uploading; keep this one's request alive until they are ready too.
     transaction.expires = Date.now() + TRANSACTION_TTL + (transaction.attachments || transaction.sourceAttachments ? 90_000 : 0);
     return { ok: true };
@@ -641,12 +779,14 @@
 
   function commit({ requestId: id }) {
     const transaction = transactionFor(id);
+    if (transaction.draftOnly) throw new Error("This request is for an editable draft. Send it from the chat when ready.");
     if (transaction.answer) checkCompareAnswer(transaction.answer);
-    const button = ready(transaction);
+    const button = ready(transaction, { allowMissing: transaction.allowMissingSend });
     // A click can synchronously navigate or throw after reaching a page handler.
     // Remember the attempt before clicking and never retry it automatically.
     transactions.delete(id);
     finished.set(id, Date.now());
+    if (!button) return { ok: true, status: "draft" };
     button.click();
     rememberReview(transaction, true);
     return { ok: true, status: "clicked" };
@@ -682,8 +822,7 @@
     return { ok: true, leftAttachments };
   }
 
-  async function insert({ text, provider: expected, notPage }) {
-    assertExpectedPage(expected, notPage);
+  async function insert({ text }) {
     prune();
     if (transactions.size) throw new Error("Another collaboration request is in progress.");
     text = checkedText(text);
@@ -714,20 +853,22 @@
     return normalize(serialize(clone).replace(/\n{3,}/g, "\n\n"));
   }
 
+  function messageVisible(node) {
+    if (provider !== "chatgpt" && provider !== "gemini") return visible(node);
+    if (node.closest("aside, nav, [role='dialog'], [role='complementary'], [data-testid='chat-side-pane'], [contenteditable='true']")) return false;
+    if (provider === "gemini" && node.closest("[role='navigation'], [aria-hidden='true'], [data-hide-from-message-actions]")) return false;
+    // A display:contents wrapper can have visible children without a box of its own.
+    return visible(node) || (getComputedStyle(node).display === "contents" && [...node.querySelectorAll("*")].some(visible));
+  }
+
   function rawResponses() {
     // Different renderers can coexist in a conversation. Collect every turn in DOM order.
-    const found = [...document.querySelectorAll(config.responses.join(", "))].filter(node => {
-      if (provider !== "chatgpt") return visible(node);
-      if (node.closest("aside, nav, [role='dialog'], [role='complementary'], [data-testid='chat-side-pane'], [contenteditable='true']")) return false;
-      // A display:contents wrapper has no box of its own even when its text is visible.
-      return visible(node) || (getComputedStyle(node).display === "contents"
-        && [...node.querySelectorAll("*")].some(visible));
-    });
+    const found = [...document.querySelectorAll(config.responses.join(", "))].filter(messageVisible);
     return found.filter(node => !found.some(other => other !== node && other.contains(node)));
   }
 
   function promptElements() {
-    const found = [...document.querySelectorAll(config.prompts.join(", "))].filter(visible);
+    const found = [...document.querySelectorAll(config.prompts.join(", "))].filter(provider === "gemini" ? messageVisible : visible);
     // Grok also renders user bubbles without a role attribute. An Edit action identifies
     // those bubbles, while an assistant markdown block or another turn stops the search.
     if (provider === "grok") {
@@ -771,9 +912,34 @@
   }
 
   function replyBody(element, raw = rawResponses()) {
+    if (provider === "gemini" && element.matches("[data-test-id='model-response']")) {
+      // React renders thinking, tool progress and actions beside the actual answer.
+      // The content wrapper is optional. Both layouts keep the answer in its own host.
+      const parts = [...element.querySelectorAll("[data-model-response-turn-id], [data-testid='collapsible-response-content']")].filter(messageVisible);
+      return parts.filter(node => !parts.some(other => other !== node && node.contains(other)))
+        .map(responseText).filter(Boolean).join("\n\n");
+    }
     if (provider !== "claude" && provider !== "gemini") return responseText(element);
     const blocks = raw.filter(node => node === element || element.contains(node));
     return blocks.length ? blocks.map(responseText).filter(Boolean).join("\n\n") : responseText(element);
+  }
+
+  function promptText(element) {
+    if (provider === "gemini") {
+      const body = element.querySelector("[data-testid='user-prompt-content'], .query-content");
+      if (body) {
+        const quotes = [...element.querySelectorAll("[data-testid='user-submitted-quote']")].filter(messageVisible);
+        return [...quotes, body].map(responseText).filter(Boolean).join("\n\n");
+      }
+    }
+    return responseText(element);
+  }
+
+  function assertGeminiReplyFinished(element) {
+    if (provider !== "gemini") return;
+    const status = element.closest("[data-test-id='model-response']")?.getAttribute("data-turn-status");
+    if (status === "failed") throw new Error("Gemini could not finish this answer. Choose another reply.");
+    if (status && status !== "settled") throw new Error("Gemini is still responding. Wait for it to finish.");
   }
 
   function selectedWithin(element) {
@@ -793,6 +959,7 @@
     element = replyScope(element);
     const selected = whole ? "" : selectedWithin(element);
     if (selected) return { ok: true, text: checkedText(selected), partial: true };
+    assertGeminiReplyFinished(element);
     if (!followedByNewer(element)) assertIdle();
     const files = globalThis.AISplitReplyFiles?.list(element) || [];
     const text = replyBody(element);
@@ -829,6 +996,7 @@
       throw new Error(`Wait for an answer to the latest prompt in ${config.name}, then open Compare again.`);
     }
     const element = latest.element;
+    assertGeminiReplyFinished(element);
     const streaming = "[data-is-streaming='true'], [data-is-loading='true'], [aria-busy='true']";
     if (element.closest(streaming) || element.querySelector(streaming)) throw new Error(`${config.name} is still responding. Wait for it to finish.`);
     const text = replyBody(element, raw);
@@ -843,12 +1011,18 @@
   }
 
   function reviewTurnKey(element) {
-    const attributes = ['data-message-id', 'data-chatgpt-selection-message-id', 'data-turn-key', 'data-content-search-unit-key', 'data-turn-id', 'data-response-id'];
+    const attributes = ['data-message-id', 'data-chatgpt-selection-message-id', 'data-turn-key', 'data-content-search-unit-key', 'data-turn-id', 'data-response-id', 'data-model-response-turn-id'];
     const selector = attributes.map(key => `[${key}]`).join(',');
     const marker = element.closest(selector) || element.querySelector(selector);
     if (marker) {
       const key = attributes.find(attribute => marker.getAttribute(attribute));
       if (key) return key + '/' + marker.getAttribute(key);
+    }
+    if (provider === "gemini" && element.matches("[data-test-id='user-query']")) {
+      // The React exchange wraps the user and model sections with its public turn ID.
+      const exchange = element.parentElement;
+      const publicId = /^(?:[0-9a-f]{1,16}|[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12})$/i;
+      if (exchange && publicId.test(exchange.id) && exchange.querySelectorAll("[data-test-id='user-query']").length === 1) return 'gemini-exchange/' + exchange.id;
     }
     return element.closest('.conversation-container[id]')?.id || null;
   }
@@ -868,8 +1042,7 @@
     const prompt = turns[end];
     if (prompt?.role !== "user") return false;
     const element = prompt.element;
-    const body = provider === "gemini" ? element.querySelector(".query-content") || element : element;
-    const text = oneLine(responseText(body));
+    const text = oneLine(promptText(element));
     if (!matchesReviewRequest(record, text)) return false;
     if (record.prompt) {
       const bound = record.prompt.node.deref();
@@ -965,7 +1138,10 @@
     const latest = latestReply();
     if (!latest) throw new Error(`Could not find a reply from ${config.name}. Select the reply text on the page, then try again.`);
     // While the newest reply is still being written, an older one must not be passed off as the latest.
-    if (!selectedWithin(latest) && followedByNewer(latest)) assertIdle();
+    if (!selectedWithin(latest) && followedByNewer(latest)) {
+      assertIdle();
+      if (provider === "gemini") throw new Error("Wait for Gemini to answer the latest prompt, or choose an earlier reply to share.");
+    }
     return replyText(latest);
   }
 
@@ -993,7 +1169,11 @@
     if (!editor) return null;
     const buttons = [...config.send, ...config.stop, ...(config.voice || [])];
     const scopes = [];
-    for (let scope = editor.parentElement; scope && scopes.length < 8; scope = scope.parentElement) scopes.push(scope);
+    const nativeComposer = provider === "gemini" && editor.closest("input-area-v2, input-area, form");
+    for (let scope = editor.parentElement; scope && (nativeComposer || scopes.length < 8); scope = scope.parentElement) {
+      scopes.push(scope);
+      if (scope === nativeComposer) break;
+    }
     for (const scope of scopes) {
       const group = (config.group || []).flatMap((selector) => [...scope.querySelectorAll(selector)]).find(visible);
       if (group) return { parent: group, before: [...group.children].find((child) => !ours(child)) || null };
@@ -1011,7 +1191,7 @@
 
   const actionLabel = (button) => normalize(button.getAttribute("aria-label") || button.title || "");
   const isCopy = (button) => button.matches(copySelectors)
-    || (provider === "gemini" && !!button.closest("message-actions copy-button"))
+    || (provider === "gemini" && !!button.closest("message-actions copy-button, [data-testid='response-copy-button']"))
     || (/^copy\b/i.test(actionLabel(button)) && !/\b(code|prompt|link|table|image)\b/i.test(actionLabel(button)));
   const isAction = (button) => isCopy(button) || REPLY_ACTION.test(actionLabel(button)) || MORE_ACTION.test(actionLabel(button));
 
@@ -1077,8 +1257,9 @@
   function replyAnchors(known = responseElements()) {
     if (provider === "gemini") {
       return known.map(response => {
-        const actions = response.querySelector("message-actions");
-        const bar = actions?.querySelector(".buttons-container-v2, .buttons-container") || actions;
+        const actions = response.querySelector("message-actions, [data-testid='chat-response-action-bar']");
+        const copy = actions?.querySelector("[data-testid='response-copy-button']");
+        const bar = copy ? slotFor(copy, actions).parentElement : actions?.querySelector(".buttons-container-v2, .buttons-container") || actions;
         // Compact layouts may defer the native toolbar. Keep sharing on this turn.
         const place = bar && laidOut(bar) ? placeInBar(bar) : { parent: response, before: null };
         return { ...place, response };
@@ -1097,8 +1278,8 @@
     const prompts = promptElements(), replies = responseElements(), anchors = [];
     for (const response of prompts) {
       if (provider === "gemini") {
-        const copy = response.querySelector("[data-test-id='prompt-copy-button']");
-        const row = copy?.closest(".luminous-actions-container") || copy?.parentElement;
+        const copy = response.querySelector("[data-test-id='prompt-copy-button'], [data-testid='user-turn-copy-button']");
+        const row = copy?.closest(".luminous-actions-container, [data-testid='user-turn-actions']") || copy?.parentElement;
         if (row && laidOut(row)) {
           const slot = slotFor(copy, row);
           let before = slot.nextElementSibling;
@@ -1145,7 +1326,7 @@
   function messages() {
     const raw = rawResponses();
     return messageElements({ raw }).map(({element, role}) => role === "user"
-      ? { element, role, text: responseText(element) }
+      ? { element, role, text: promptText(element) }
       : { element, role, text: replyBody(element, raw), files: globalThis.AISplitReplyFiles?.list(element) || [] }
     ).filter(entry => entry.text || entry.files?.length);
   }
@@ -1167,7 +1348,7 @@
     for (const entry of selected) {
       // Checkbox selection always means the whole message, regardless of highlighted text.
       const result = entry.role === "assistant" ? await readReply(entry.element, { whole: true })
-        : { text: responseText(entry.element) };
+        : { text: promptText(entry.element) };
       if (location.href !== url || !selected.every(item => item.element.isConnected)) {
         throw new Error("The conversation changed while reading it. Select the messages again.");
       }
@@ -1199,7 +1380,7 @@
     } else if ([...document.querySelectorAll("textarea, [contenteditable='true']")].some((node) => visible(node) && readEditor(node))) {
       throw new Error(`This page has unsent text that ${config.name}'s adapter does not recognize. Clear it before switching.`);
     }
-    const persistent = { chatgpt: /\/c\/[^/]+/, claude: /\/chat\/[^/]+/, gemini: /\/app\/[^/]+/, grok: /\/c\/[^/]+/ }[provider].test(location.pathname);
+    const persistent = { chatgpt: /\/c\/[^/]+/, claude: /\/chat\/[^/]+/, gemini: /\/(?:app\/[^/]+|gem\/[^/]+\/[^/]+)\/?$/, grok: /\/c\/[^/]+/ }[provider].test(location.pathname);
     const hasReply = config.responses.some((selector) => [...document.querySelectorAll(selector)].some(visible));
     if ((hasReply && !persistent) || new URL(location.href).searchParams.get("temporary-chat") === "true") {
       throw new Error(`${config.name}'s chat has no saved conversation link. Open a saved conversation before switching so you can return to it.`);
@@ -1211,7 +1392,8 @@
     provider,
     name: config.name,
     getDraft: () => ({ ok: true, text: readEditor(getEditor()) }),
-    readPrompt, canLeave, preflight, stage, validate, commit, keep, cancel, insert, getResponse, replyText,
+    readPrompt, canLeave, preflight: request => withMountedComposer(request, preflight), stage, validate, commit, keep, cancel,
+    insert: async request => withMountedComposer(request, insert), getResponse, replyText,
     readReplyFiles: files => globalThis.AISplitReplyFiles.read(files),
     readReply, messageElements, messages, readMessage, readMessages, promptAnchors,
     compareStatus, readCompareAnswer: compareAnswer, checkCompareAnswer, reviewResult,
