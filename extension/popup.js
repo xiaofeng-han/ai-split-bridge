@@ -64,6 +64,15 @@ async function refresh() {
     $('#right').value = previous[1] || String(other?.id || '');
   }
   $('#pair-section').hidden = !result.canManageSplit;
+  // The pair made last time is remembered by assistant, so one click can open it again.
+  const names = [result.lastPair?.left, result.lastPair?.right].map(provider => assistants.find(item => item.provider === provider)?.name);
+  const again = $('#pair-last');
+  again.hidden = !result.canManageSplit || names.some(name => !name);
+  if (!again.hidden) {
+    const [left, right] = names;
+    again.textContent = t('Open {left} + {right}', { left, right });
+    again.title = t('{left} on the left and {right} on the right, as last time. An open chat is used as it is; a missing one is opened.', { left, right });
+  }
   $('#capability').textContent = result.peer
     ? t('Side by side with {name}', { name: result.peer.name })
     : result.canManageSplit ? t('Choose two chats to put side by side.')
@@ -87,6 +96,9 @@ $('#pair-form').addEventListener('submit', event => {
     ? [`${side}Provider`, value.slice(NEW_CHAT.length)] : [`${side}Id`, Number(value)]));
   const working = sides.some(([, value]) => isNew(value)) ? t('Opening the chat and creating the split…') : '';
   action($('#pair'), () => send('ASB_PAIR', choice), working);
+});
+$('#pair-last').addEventListener('click', () => {
+  action($('#pair-last'), () => send('ASB_PAIR_LAST'), t('Opening the chat and creating the split…'));
 });
 document.querySelectorAll('[data-provider]').forEach(button => button.addEventListener('click', () => {
   action(button, () => send('ASB_OPEN', { provider: button.dataset.provider }));

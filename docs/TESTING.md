@@ -34,7 +34,10 @@ Needs a Chrome that lets extensions create splits (155 or later); otherwise the 
 5. Try an open chat in a tab group and a pinned one: the new tab should join the same group or be pinned too. A chat already in another split must be refused before any tab opens.
 6. Sign out of one site and choose it as a new chat. If its sign-in page is on another address (Google’s, for example), no split is made and after about ten seconds the popup says the new chat has not finished opening. The tab stays open: sign in there, then create the split with it as an open chat.
 
-In the local fixture, open `/popup.html?pair` to see the form.
+7. After one split has been made from the popup, reopen it: a button such as **Open Gemini + Claude** should sit above the form, in the left and right order used last time. Close both chats and click it: both should open and be split. Leave one open and not in a split: that chat should be used as it is and only the other opened. With the pair already side by side, it should say so and change nothing.
+8. Sign in to Chrome on a second computer with sync on: the same button should appear there.
+
+In the local fixture, open `/popup.html?pair` to see the form and the button.
 
 ## Controls appear in the right places
 

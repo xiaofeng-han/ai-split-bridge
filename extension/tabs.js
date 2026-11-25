@@ -212,6 +212,28 @@ export function createTabManager(api) {
     };
   }
 
+  // Pairs two assistants by name. An open chat that is not in a split is used as it is;
+  // an assistant with no such chat is opened.
+  async function pairAssistants(leftProvider, rightProvider, windowId) {
+    if (![leftProvider, rightProvider].every(provider => Object.hasOwn(PROVIDERS, provider))) throw new Error(t('Choose a supported assistant.'));
+    const tabs = await api.tabs.query({ windowId });
+    const active = tabs.find(tab => tab.active);
+    if (active && hasSplit(active)) {
+      const shown = tabs.filter(tab => tab.splitViewId === active.splitViewId).map(tab => providerFor(tab.url)).sort();
+      if (shown.length === 2 && shown.join() === [leftProvider, rightProvider].sort().join()) {
+        return { ok: true, message: t('These chats are already side by side.') };
+      }
+    }
+    // The chat in front comes first, then the one used most recently.
+    const free = tabs.filter(tab => !hasSplit(tab) && !(tab.pendingUrl && tab.pendingUrl !== tab.url))
+      .sort((a, b) => Number(b.active) - Number(a.active) || (b.lastAccessed || 0) - (a.lastAccessed || 0) || a.index - b.index);
+    const left = free.find(tab => providerFor(tab.url) === leftProvider);
+    // Chrome only splits tabs with the same pinned state and tab group, so a chat elsewhere stays where it is.
+    const right = free.find(tab => providerFor(tab.url) === rightProvider && tab.id !== left?.id
+      && (!left || (tab.pinned === left.pinned && tab.groupId === left.groupId)));
+    return pair(left ? left.id : { provider: leftProvider }, right ? right.id : { provider: rightProvider }, windowId);
+  }
+
   // Replaces the chat shown in one pane with another assistant or a specific open chat.
   async function replace(paneId, { provider, tabId } = {}) {
     const state = await context(paneId);
@@ -229,5 +251,5 @@ export function createTabManager(api) {
     return canManageSplit() ? swapIn(state, provider, incoming) : navigatePane(state, provider, incoming);
   }
 
-  return { context, pair, replace, supported, canManageSplit };
+  return { context, pair, pairAssistants, replace, supported, canManageSplit };
 }

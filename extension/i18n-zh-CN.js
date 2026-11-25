@@ -57,6 +57,8 @@ globalThis.AISplitI18n.register('zh-CN', {
   'New {name} chat': '新的 {name} 聊天',
   'Choose a chat for each side.': '请为左右两侧各选择一个聊天。',
   'Opening the chat and creating the split…': '正在打开聊天并创建分屏…',
+  'Open {left} + {right}': '打开 {left} + {right}',
+  '{left} on the left and {right} on the right, as last time. An open chat is used as it is; a missing one is opened.': '和上次一样，{left} 在左侧、{right} 在右侧。已打开的聊天会直接用，没打开的会新开。',
   'Side by side with {name}': '正与 {name} 并排显示',
   'Choose two chats to put side by side.': '选择两个聊天并排显示。',
   'Right-click an AI chat tab and choose Split View to pair it.': '右键点击 AI 聊天标签页，选择“分屏视图”来配对。',
@@ -258,6 +260,7 @@ globalThis.AISplitI18n.register('zh-CN', {
   'Unknown assistant.': '未知的助手。',
   '{name} opened in a new tab. Sign in if needed.': '{name} 已在新标签页中打开。如有需要请先登录。',
   'Unsupported popup action.': '不支持的弹窗操作。',
+  'Create a split from this popup once first. It then remembers that pair.': '请先在这个弹窗里创建一次分屏，之后它会记住那个组合。',
   'The action could not be completed.': '无法完成该操作。',
 
   // ---------- Tabs and Split View ----------

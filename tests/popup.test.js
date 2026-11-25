@@ -268,16 +268,17 @@ test('a saved language is used when the popup opens, and a customized message is
 });
 
 // ---------- Opening an assistant from the Split View form ----------
-function browserWith(tabs, { peer = null, reply = { ok: true, message: 'Split View ready.' } } = {}) {
+function browserWith(tabs, { peer = null, reply = { ok: true, message: 'Split View ready.' }, lastPair = null, canManageSplit = true } = {}) {
   const sent = [];
-  return {
-    sent,
+  const browser = {
+    sent, lastPair,
     async sendMessage(message) {
-      if (message.type === 'ASB_LIST') return { ok: true, tabs, activeId: tabs[0]?.id, canManageSplit: true, peer };
+      if (message.type === 'ASB_LIST') return { ok: true, tabs, activeId: tabs[0]?.id, canManageSplit, peer, lastPair: browser.lastPair };
       sent.push(structuredClone(message));
       return reply;
     },
   };
+  return browser;
 }
 const options = (view, selector) => Array.from(view.$(selector).options, option => [option.value, option.textContent]);
 const submitPair = view => view.$('#pair-form').dispatchEvent(new view.window.Event('submit', { cancelable: true }));
@@ -336,4 +337,42 @@ test('two open chats are still paired by their tabs, and a choice survives the l
   submitPair(view);
   await until(() => browser.sent.length === 1);
   assert.deepEqual(browser.sent, [{ type: 'ASB_PAIR', leftId: 3, rightId: 4 }]);
+});
+
+// ---------- One click for the last pair ----------
+test('the last pair of assistants can be opened again with one click', async t => {
+  const browser = browserWith([], { lastPair: { left: 'gemini', right: 'claude' } });
+  const view = await popup(t, memory(), browser.sendMessage);
+  await until(() => !view.$('#pair-last').hidden);
+  assert.equal(shown(view, '#pair-last'), 'Open Gemini + Claude');
+  assert.match(view.$('#pair-last').title, /^Gemini on the left and Claude on the right, as last time\./);
+  view.$('#pair-last').click();
+  assert.equal(shown(view, '#status'), 'Opening the chat and creating the split…');
+  await until(() => shown(view, '#status') === 'Split View ready.');
+  assert.deepEqual(browser.sent, [{ type: 'ASB_PAIR_LAST' }]);
+
+  pickLanguage(view, 'zh-CN');
+  await until(() => shown(view, '#pair-last') === '打开 Gemini + Claude');
+  assert.match(view.$('#pair-last').title, /^和上次一样，Gemini 在左侧、Claude 在右侧。/);
+});
+
+test('the one-click button appears once a pair has been made, and only where splits can be created', async t => {
+  const browser = browserWith([{ id: 3, name: 'ChatGPT', title: 'One', index: 0 }]);
+  const view = await popup(t, memory(), browser.sendMessage);
+  await until(() => !view.$('#pair-section').hidden);
+  assert.equal(view.$('#pair-last').hidden, true, 'nothing is remembered yet');
+  view.$('#right').value = 'new:grok';
+  browser.lastPair = { left: 'chatgpt', right: 'grok' };
+  submitPair(view);
+  await until(() => !view.$('#pair-last').hidden);
+  assert.equal(shown(view, '#pair-last'), 'Open ChatGPT + Grok');
+
+  for (const browser of [
+    browserWith([], { lastPair: { left: 'gemini', right: 'claude' }, canManageSplit: false }),
+    browserWith([], { lastPair: { left: 'gemini', right: 'perplexity' } }),
+  ]) {
+    const other = await popup(t, memory(), browser.sendMessage);
+    await until(() => other.$('#left').options.length > 1);
+    assert.equal(other.$('#pair-last').hidden, true);
+  }
 });
